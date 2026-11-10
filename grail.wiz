@@ -1,0 +1,9 @@
+import Grail
+-- `grail build`: check the library (designs and proofs; the loopback proofs take about
+-- ten minutes the first time) and compile the flow driver, `.grail/bin/icestick` (see
+-- app/icestick.wiz for its commands). `grail build icestick` is the driver alone.
+-- `grail test`: the simulation tests under tests/.
+def package : Package := Package.new "icestick-uart"
+  |> Package.lib "lib" "src"
+  |> Package.exe "icestick" "app/icestick.wiz"
+  |> Package.tests "tests" "tests"

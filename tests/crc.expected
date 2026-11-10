@@ -1,0 +1,3 @@
+crcStep = Crc.step on 65536 of 65536 inputs
+hexDigit = Crc.hex on 16 of 16 inputs
+CRC-8 of "123456789": 244 (0xF4 = 244)

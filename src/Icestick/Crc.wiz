@@ -1,0 +1,42 @@
+import Icestick.Gates
+-- CRC-8 (polynomial x^8 + x^2 + x + 1 = 0x07, initial value 0, most significant bit
+-- first, no reflection, no final xor: "CRC-8/SMBUS"), twice: as hardware, one byte per
+-- clock cycle, and as a function on numbers, which is what the host computes.
+
+-- one bit: shift left, and subtract the polynomial if a one fell out
+def crcBit {r : HwTy → Type} [Hw r] (c : r B8) : r B8 :=
+  let sh := shl1 c;
+  Hw.mux (Hw.slice 7 1 c) (Hw.xor sh (Hw.lit 8 7)) sh
+
+def crcIter {r : HwTy → Type} [Hw r] : Nat → r B8 → r B8
+  | .zero, c => c
+  | .succ k, c => crcIter k (crcBit c)
+
+-- the CRC after one more byte `d`: eight copies of `crcBit`, unrolled
+def crcStep {r : HwTy → Type} [Hw r] (c d : r B8) : r B8 := crcIter 8 (Hw.xor c d)
+
+-- a nibble as an ASCII hexadecimal digit (upper case)
+def hexDigit {r : HwTy → Type} [Hw r] (nib : r B4) : r B8 :=
+  let z := Hw.cat (Hw.lit 4 0 : r (HwTy.bits 4)) nib;
+  Hw.mux (Hw.ult nib (Hw.lit 4 10)) (Hw.add z (Hw.lit 8 48)) (Hw.add z (Hw.lit 8 55))
+
+------------------------------------------------------------------------------------
+-- The specification, on numbers.
+
+def Crc.bit (c : Nat) : Nat := match Nat.testBit c 7 with
+  | .true => Nat.xor (Nat.mod (c * 2) 256) 7
+  | .false => Nat.mod (c * 2) 256
+def Crc.iter : Nat → Nat → Nat
+  | .zero, c => c
+  | .succ k, c => Crc.iter k (Crc.bit c)
+def Crc.step (c d : Nat) : Nat := Crc.iter 8 (Nat.xor c d)
+def Crc.ofList : Nat → List Nat → Nat
+  | c, .nil => c
+  | c, .cons d ds => Crc.ofList (Crc.step c d) ds
+def Crc.hex (n : Nat) : Nat := match Nat.lt n 10 with
+  | .true => 48 + n
+  | .false => 55 + n
+-- the device's answer to a line: two hex digits and a newline
+def Crc.reply (line : List Nat) : List Nat :=
+  let c := Crc.ofList 0 line
+  .cons (Crc.hex (Nat.div c 16)) (.cons (Crc.hex (Nat.mod c 16)) (.cons 10 .nil))

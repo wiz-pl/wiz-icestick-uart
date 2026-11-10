@@ -1,0 +1,87 @@
+import Icestick.Gates
+-- An 8N1 UART: a baud divider, a transmitter and a receiver, as step functions over
+-- explicit state types. `n` is the number of clock cycles per bit, a meta-level `Nat`:
+-- it only ends up in the netlist as the constants the counters are compared with.
+--
+-- On the iCEstick: 12 MHz / 104 = 115384.6 baud, 0.16 % above 115200.
+
+------------------------------------------------------------------------------------
+-- The baud divider: a 7-bit counter that counts 0 … n-1; `tick` is high in the last
+-- cycle of each period. (`Icestick.Proofs` shows that its period is exactly `n`.)
+
+def baudStep {r : HwTy → Type} [Hw r] (n : Nat) (c : r B7) : r (HwTy.prod B7 Bit) :=
+  let t := eqLit c (n - 1);
+  Hw.pair (Hw.mux t (Hw.lit 7 0) (inc c)) t
+
+------------------------------------------------------------------------------------
+-- The transmitter. State: the line (a register of its own, so the pin is driven by a
+-- flip-flop and cannot glitch), the number of bit periods left (0: idle), the baud
+-- counter, and a 9-bit shift register (stop bit on top of the data, least significant
+-- bit first; ones are shifted in).
+--
+-- `start` with `d` is taken when idle and ignored otherwise.
+
+def TxS : HwTy := HwTy.prod Bit (HwTy.prod B4 (HwTy.prod B7 B9))
+
+def TxS.init : HwTy.El TxS :=
+  (BitVec.ofNat 1 1, (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, BitVec.ofNat 9 511)))
+
+def txLine {r : HwTy → Type} [Hw r] (s : r TxS) : r Bit := Hw.fst s
+def txIdle {r : HwTy → Type} [Hw r] (s : r TxS) : r Bit := eqLit (Hw.fst (Hw.snd s)) 0
+
+def txStep {r : HwTy → Type} [Hw r] (n : Nat) (s : r TxS) (start : r Bit) (d : r B8) : r TxS :=
+  let line := Hw.fst s;
+  let left := Hw.fst (Hw.snd s);
+  let cnt := Hw.fst (Hw.snd (Hw.snd s));
+  let sh := Hw.snd (Hw.snd (Hw.snd s));
+  let idle := eqLit left 0;
+  let go := band idle start;
+  let b := baudStep n cnt;
+  let tick := band (bnot idle) (Hw.snd b);
+  let line' := Hw.mux go lo (Hw.mux tick (Hw.slice 0 1 sh) line);
+  let left' := Hw.mux go (Hw.lit 4 10) (Hw.mux tick (dec left) left);
+  let cnt' := Hw.mux go (Hw.lit 7 0) (Hw.fst b);
+  let sh' := Hw.mux go (frame9 d) (Hw.mux tick (shiftIn9 sh hi) sh);
+  Hw.pair line' (Hw.pair left' (Hw.pair cnt' sh'))
+
+------------------------------------------------------------------------------------
+-- The receiver. State: the phase (0: idle, 10: in the start bit, 9 … 2: data bits,
+-- 1: stop bit), the baud counter and the shift register.
+--
+-- A low line when idle starts a frame; half a bit later the line must still be low
+-- (otherwise it was a glitch), and from there the line is sampled once per bit period,
+-- i.e. in the middle of each bit. `valid` is high for one cycle, at the sample of a
+-- stop bit that is high, and `data` is the byte then.
+
+def RxS : HwTy := HwTy.prod B4 (HwTy.prod B7 B8)
+
+def RxS.init : HwTy.El RxS := (BitVec.ofNat 4 0, (BitVec.ofNat 7 0, BitVec.ofNat 8 0))
+
+-- (state', (valid, data))
+def rxStep {r : HwTy → Type} [Hw r] (n : Nat) (s : r RxS) (rx : r Bit) :
+    r (HwTy.prod RxS (HwTy.prod Bit B8)) :=
+  let ph := Hw.fst s;
+  let cnt := Hw.fst (Hw.snd s);
+  let sh := Hw.snd (Hw.snd s);
+  let idle := eqLit ph 0;
+  let inStart := eqLit ph 10;
+  let inStop := eqLit ph 1;
+  let fall := band idle (bnot rx);
+  let startTick := band inStart (eqLit cnt (Nat.div n 2 - 1));
+  let tick := band (bnot idle) (band (bnot inStart) (eqLit cnt (n - 1)));
+  let ph' := Hw.mux fall (Hw.lit 4 10)
+    (Hw.mux startTick (Hw.mux rx (Hw.lit 4 0) (Hw.lit 4 9)) (Hw.mux tick (dec ph) ph));
+  let cnt' := Hw.mux (bor fall (bor startTick tick)) (Hw.lit 7 0) (inc cnt);
+  let sh' := Hw.mux (band tick (bnot inStop)) (shiftIn8 sh rx) sh;
+  let valid := band tick (band inStop rx);
+  Hw.pair (Hw.pair ph' (Hw.pair cnt' sh')) (Hw.pair valid sh)
+
+------------------------------------------------------------------------------------
+-- The input synchroniser: the RX pin is asynchronous to the clock, so it goes through
+-- two flip-flops before anything looks at it. State: (first, second), both idle high.
+
+def SyncS : HwTy := HwTy.prod Bit Bit
+def SyncS.init : HwTy.El SyncS := (BitVec.ofNat 1 1, BitVec.ofNat 1 1)
+def syncOut {r : HwTy → Type} [Hw r] (s : r SyncS) : r Bit := Hw.snd s
+def syncStep {r : HwTy → Type} [Hw r] (s : r SyncS) (pin : r Bit) : r SyncS :=
+  Hw.pair pin (Hw.fst s)

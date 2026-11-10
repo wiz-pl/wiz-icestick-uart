@@ -1,0 +1,9 @@
+import Icestick.Proofs
+-- Loopback with the board's divider (104 cycles per bit; 1100 cycles cover a frame):
+-- the byte sent is the one byte received, for all zeros, all ones and the two
+-- alternating patterns. See `Icestick.Proofs.Loopback` for every byte.
+
+def Loop.board_00 : Loop.ok clocksPerBit 1100 0 = .true := refl Bool.true
+def Loop.board_ff : Loop.ok clocksPerBit 1100 255 = .true := refl Bool.true
+def Loop.board_55 : Loop.ok clocksPerBit 1100 85 = .true := refl Bool.true
+def Loop.board_aa : Loop.ok clocksPerBit 1100 170 = .true := refl Bool.true

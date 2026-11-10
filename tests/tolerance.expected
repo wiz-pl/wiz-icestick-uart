@@ -1,0 +1,7 @@
+host bit = 104167/1000 cycles (115200 baud exactly, board 0.16 % fast): all answers right
+host bit = 101920/1000 cycles (host 2 % fast): all answers right
+host bit = 106080/1000 cycles (host 2 % slow): all answers right
+host bit = 99840/1000 cycles (host 4 % fast): all answers right
+host bit = 108160/1000 cycles (host 4 % slow): all answers right
+host bit = 95680/1000 cycles (host 8 % fast: out of tolerance): wrong answers
+host bit = 112320/1000 cycles (host 8 % slow: out of tolerance): wrong answers

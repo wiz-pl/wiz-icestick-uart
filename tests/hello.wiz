@@ -1,0 +1,24 @@
+-- test: run
+import Icestick.Board
+import IO
+-- `hello` with a short pause (2^8 cycles instead of 2^22): the text, a pause, the
+-- text again; and `blinky`: the LEDs are the top five bits of a 24-bit counter.
+
+def showBytes : List Nat → String
+  | .nil => ""
+  | .cons x xs => String.mk (.cons (Char.mk (match Nat.lt x 32 with
+      | .true => 46
+      | .false => x)) .nil) <+> showBytes xs
+
+def twice : List Nat :=
+  Wave.decode clocksPerBit 1 (Sim.txLine (Sim.run (hello clocksPerBit 8) (Wave.rep 36000 1 .nil)))
+
+-- the LEDs after 2^19 + 5 cycles of a counter that starts at 2^24 - 2^19 (so that the
+-- test does not need half a million cycles): the counter has wrapped to 5
+def blinkyFrom (start cycles : Nat) : Nat :=
+  NatList.last 0 (Sim.leds (Sim.go blinky (BitVec.ofNat 24 start) (Wave.rep cycles 1 .nil) .nil))
+
+def main : IO Unit := do
+  IO.println (showBytes twice);
+  IO.println ("leds after 5 cycles from 0x0FFFFE: " <+> Nat.show (blinkyFrom 1048574 5));
+  IO.println ("leds after 5 cycles from 0xF7FFFE: " <+> Nat.show (blinkyFrom 16252926 5))

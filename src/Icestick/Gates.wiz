@@ -1,0 +1,47 @@
+import Hdl.Core
+-- Small vocabulary on top of `Hdl.Core`'s `Hw` operations, shared by every design here.
+-- Everything is polymorphic in the representation `r`, so it simulates (`HwTy.El`) and
+-- synthesises (`Wire`) from the same text.
+
+def Bit : HwTy := HwTy.bits 1
+def B2 : HwTy := HwTy.bits 2
+def B4 : HwTy := HwTy.bits 4
+def B5 : HwTy := HwTy.bits 5
+def B6 : HwTy := HwTy.bits 6
+def B7 : HwTy := HwTy.bits 7
+def B8 : HwTy := HwTy.bits 8
+def B9 : HwTy := HwTy.bits 9
+def None0 : HwTy := HwTy.bits 0
+
+def hi {r : HwTy → Type} [Hw r] : r Bit := Hw.lit 1 1
+def lo {r : HwTy → Type} [Hw r] : r Bit := Hw.lit 1 0
+
+def band {r : HwTy → Type} [Hw r] (a b : r Bit) : r Bit := Hw.and a b
+def bor {r : HwTy → Type} [Hw r] (a b : r Bit) : r Bit := Hw.or a b
+def bnot {r : HwTy → Type} [Hw r] (a : r Bit) : r Bit := Hw.not a
+
+-- `x == k` and `x + 1` at any width
+def eqLit {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r Bit :=
+  Hw.eq x (Hw.lit n k)
+def inc {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) : r (HwTy.bits n) :=
+  Hw.add x (Hw.lit n 1)
+def dec {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) : r (HwTy.bits n) :=
+  Hw.sub x (Hw.lit n 1)
+
+-- Shift registers, least significant bit first: `b` comes in at the top.
+-- (Helpers with full signatures: written inline in a chain of `let`s, `Hw.cat` of a
+--  literal does not elaborate; see FINDINGS.md, "cat inside a let chain".)
+def frame9 {r : HwTy → Type} [Hw r] (d : r B8) : r B9 := Hw.cat (Hw.lit 1 1 : r (HwTy.bits 1)) d
+def shiftIn9 {r : HwTy → Type} [Hw r] (x : r B9) (b : r Bit) : r B9 := Hw.cat b (Hw.slice 1 8 x)
+def shiftIn8 {r : HwTy → Type} [Hw r] (x : r B8) (b : r Bit) : r B8 := Hw.cat b (Hw.slice 1 7 x)
+
+def shl1 {r : HwTy → Type} [Hw r] (c : r B8) : r B8 := Hw.cat (Hw.slice 0 7 c) (Hw.lit 1 0)
+
+-- A read-only memory as a chain of multiplexers: entry `k` of the list at index `k`
+-- (a meta-level recursion: the list is gone from the netlist, only constants remain).
+def rom {r : HwTy → Type} [Hw r] (idx : r B5) : Nat → List Nat → r B8
+  | _, .nil => Hw.lit 8 0
+  | k, .cons c cs => Hw.mux (eqLit idx k) (Hw.lit 8 c) (rom idx (Nat.succ k) cs)
+
+-- The board's output bus: the five LEDs on top of the TX line.
+def outPack {r : HwTy → Type} [Hw r] (leds : r B5) (line : r Bit) : r B6 := Hw.cat leds line

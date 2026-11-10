@@ -1,0 +1,109 @@
+import Icestick.Designs
+import Icestick.Wave
+import Logic
+-- What is proved about the designs. Everything here is about the very step functions
+-- that are synthesised (`baudStep`, `txStep`, `rxStep`), at the value representation
+-- `HwTy.El`, with the board's divider (104 cycles per bit). The kernel checks each
+-- statement; evaluations inside the proofs (`refl`) are run by the kernel too.
+
+------------------------------------------------------------------------------------
+-- Iteration, and a fact about it: a state that comes back after `p` steps comes back
+-- after any number of rounds of `p` steps.
+
+def iter {A : Type} (f : A → A) : Nat → A → A
+  | .zero, a => a
+  | .succ k, a => iter f k (f a)
+
+def rounds {A : Type} (f : A → A) (p : Nat) : Nat → A → A
+  | .zero, a => a
+  | .succ m, a => rounds f p m (iter f p a)
+
+def rounds_fixed {A : Type} (f : A → A) (p : Nat) (a : A) (h : iter f p a = a) :
+    (m : Nat) → rounds f p m a = a
+  | .zero => refl a
+  | .succ m => Eq.trans (Eq.congrArg (rounds f p m) h) (rounds_fixed f p a h m)
+
+------------------------------------------------------------------------------------
+-- 1. The baud divider has period exactly 104, for ever.
+
+def Baud.next (c : BitVec 7) : BitVec 7 := (@baudStep HwTy.El _ clocksPerBit c).1
+def Baud.tick (c : BitVec 7) : Nat := BitVec.toNat (@baudStep HwTy.El _ clocksPerBit c).2
+
+-- the ticks of the next `k` cycles from a state
+def Baud.ticks : Nat → BitVec 7 → List Nat
+  | .zero, c => .nil
+  | .succ k, c => .cons (Baud.tick c) (Baud.ticks k (Baud.next c))
+
+def Baud.zero : BitVec 7 := BitVec.ofNat 7 0
+
+-- 103 cycles without a tick, then one with
+def Baud.pattern : List Nat := List.append (Wave.rep 103 0 .nil) (.cons 1 .nil)
+
+-- after 104 cycles the counter is back at its initial value …
+def Baud.returns : iter Baud.next 104 Baud.zero = Baud.zero := refl Baud.zero
+-- … and of those 104 cycles exactly the last one ticks
+def Baud.one_tick : Baud.ticks 104 Baud.zero = Baud.pattern := refl Baud.pattern
+
+-- so, after any number `m` of periods, the counter is at its initial value again,
+def Baud.periodic (m : Nat) : rounds Baud.next 104 m Baud.zero = Baud.zero :=
+  rounds_fixed Baud.next 104 Baud.zero Baud.returns m
+-- and the period that follows has the same ticks: one tick every 104 cycles, for ever.
+-- At 12 MHz that is 115384.6 bits per second.
+def Baud.period (m : Nat) : Baud.ticks 104 (rounds Baud.next 104 m Baud.zero) = Baud.pattern :=
+  @Eq.trans (List Nat) (Baud.ticks 104 (rounds Baud.next 104 m Baud.zero)) (Baud.ticks 104 Baud.zero) Baud.pattern
+    (Eq.congrArg (Baud.ticks 104) (Baud.periodic m)) Baud.one_tick
+
+------------------------------------------------------------------------------------
+-- 2. Loopback: every byte sent by the transmitter is received by the receiver.
+--
+-- The transmitter's line goes through the synchroniser into the receiver (`loopStep`,
+-- with `n` clock cycles per bit). A byte `b` is offered in the first cycle and nothing
+-- after; `Loop.received` collects the bytes the receiver reports in the first `c`
+-- cycles. The statements are in `Icestick.Proofs.Loopback` (the kernel runs the
+-- circuit there, which takes minutes).
+
+def Loop.quiet : HwTy.El (HwTy.prod Bit B8) := (BitVec.ofNat 1 0, BitVec.ofNat 8 0)
+def Loop.send (b : Nat) : HwTy.El (HwTy.prod Bit B8) := (BitVec.ofNat 1 1, BitVec.ofNat 8 b)
+
+def Loop.go (n : Nat) : Nat → HwTy.El LoopS → HwTy.El (HwTy.prod Bit B8) → List Nat → List Nat
+  | .zero, s, x, acc => acc
+  | .succ k, s, x, acc =>
+    let ω r : HwTy.El (HwTy.prod LoopS (HwTy.prod Bit B8)) := @loopStep HwTy.El _ n s x;
+    Loop.go n k r.1 Loop.quiet (match BitVec.isTrue r.2.1 with
+      | .true => List.cons (BitVec.toNat r.2.2) acc
+      | .false => acc)
+
+def Loop.received (n c b : Nat) : List Nat :=
+  Loop.go n c (TxS.init, (SyncS.init, RxS.init)) (Loop.send b) .nil
+
+-- exactly one byte arrives, and it is `b`
+def Loop.ok (n c b : Nat) : Bool := NatList.beq (Loop.received n c b) (.cons b .nil)
+
+-- "for every k below n", as a computation, and what it means
+def allBelow : Nat → (Nat → Bool) → Bool
+  | .zero, p => .true
+  | .succ n, p => Bool.and (p 0) (allBelow n (fun (k : Nat) => p (Nat.succ k)))
+
+def Bool.and_left : (a b : Bool) → Bool.and a b = .true → a = .true
+  | .true, b, h => refl Bool.true
+  | .false, b, h => absurd h.1
+def Bool.and_right : (a b : Bool) → Bool.and a b = .true → b = .true
+  | .true, b, h => h
+  | .false, b, h => absurd h.1
+
+-- (recursion on `k` first: with `n` first the definition is rejected; FINDINGS.md)
+def allBelow_spec : (k n : Nat) → (p : Nat → Bool) → allBelow n p = .true → Nat.lt k n = .true → p k = .true
+  | .zero, .zero, p, h, hk => absurd hk.1
+  | .succ k, .zero, p, h, hk => absurd hk.1
+  | .zero, .succ n, p, h, hk => Bool.and_left (p 0) (allBelow n (fun (j : Nat) => p (Nat.succ j))) h
+  | .succ k, .succ n, p, h, hk =>
+    allBelow_spec k n (fun (j : Nat) => p (Nat.succ j))
+      (Bool.and_right (p 0) (allBelow n (fun (j : Nat) => p (Nat.succ j))) h) hk
+
+-- byte `base + k`, with 8 cycles per bit (90 cycles cover a frame of 80)
+def Loop.at8 (base k : Nat) : Bool := Loop.ok 8 90 (base + k)
+
+-- from a checked range to its members: byte `base + k`, for `k` below 16
+def Loop.inRange (base : Nat) (h : allBelow 16 (Loop.at8 base) = .true)
+    (k : Nat) (hk : Nat.lt k 16 = .true) : Loop.at8 base k = .true :=
+  allBelow_spec k 16 (Loop.at8 base) h hk

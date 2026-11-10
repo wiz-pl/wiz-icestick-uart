@@ -1,0 +1,21 @@
+import Icestick.Proofs
+-- Loopback with 8 clock cycles per bit, for every byte: the byte sent is the one byte
+-- received (90 cycles cover a frame of 80). Part 1 of 2.
+--
+-- The divider is a meta-level parameter of `txStep` and `rxStep` that only changes the
+-- constants the counters are compared with; `Icestick.Proofs.Board` has four bytes at
+-- the board's 104 cycles per bit, and `tests/loopback.wiz` runs all 256 there.
+--
+-- Sixteen bytes per statement: the kernel keeps about a megabyte per simulated cycle
+-- until a declaration is done, and it evaluates a statement of this kind again wherever
+-- it is used, so the sixteen ranges are not glued into one `allBelow 256` (FINDINGS.md,
+-- G11). `Loop.inRange` is what each statement says about its bytes.
+
+def Loop.range_00 : allBelow 16 (Loop.at8 0) = .true := refl Bool.true
+def Loop.range_10 : allBelow 16 (Loop.at8 16) = .true := refl Bool.true
+def Loop.range_20 : allBelow 16 (Loop.at8 32) = .true := refl Bool.true
+def Loop.range_30 : allBelow 16 (Loop.at8 48) = .true := refl Bool.true
+def Loop.range_40 : allBelow 16 (Loop.at8 64) = .true := refl Bool.true
+def Loop.range_50 : allBelow 16 (Loop.at8 80) = .true := refl Bool.true
+def Loop.range_60 : allBelow 16 (Loop.at8 96) = .true := refl Bool.true
+def Loop.range_70 : allBelow 16 (Loop.at8 112) = .true := refl Bool.true

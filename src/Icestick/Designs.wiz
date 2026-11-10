@@ -1,0 +1,134 @@
+import Icestick.Uart
+import Icestick.Crc
+-- The designs. Each is a `Circuit Bit B6` for the same board pins: the input is the
+-- UART RX pin, the output bus is the five LEDs (bits 5 … 1: LED5 … LED1) on top of the
+-- UART TX pin (bit 0). `n` is the number of clock cycles per UART bit.
+
+def B22 : HwTy := HwTy.bits 22
+def B24 : HwTy := HwTy.bits 24
+
+------------------------------------------------------------------------------------
+-- 1. blinky: a 24-bit counter, its top five bits on the LEDs (LED5 blinks at
+--    12 MHz / 2^24 = 0.72 Hz). The TX line idles high.
+
+def blinky : Circuit Bit B6 :=
+  Circuit.mk B24 (BitVec.ofNat 24 0) (fun s x => Hw.pair (inc s) (outPack (Hw.slice 19 5 s) hi))
+
+------------------------------------------------------------------------------------
+-- 2. hello: send a fixed string, wait 2^g cycles, again. The LEDs show the index.
+
+def helloText : List Nat :=   -- "Hello from Wiz!\r\n"
+  .cons 72 (.cons 101 (.cons 108 (.cons 108 (.cons 111 (.cons 32 (.cons 102 (.cons 114
+  (.cons 111 (.cons 109 (.cons 32 (.cons 87 (.cons 105 (.cons 122 (.cons 33 (.cons 13
+  (.cons 10 .nil))))))))))))))))
+
+def HelloS (g : Nat) : HwTy := HwTy.prod TxS (HwTy.prod B5 (HwTy.bits g))
+
+def helloStep {r : HwTy → Type} [Hw r] (n g : Nat) (s : r (HelloS g)) : r (HwTy.prod (HelloS g) B6) :=
+  let txs := Hw.fst s;
+  let idx := Hw.fst (Hw.snd s);
+  let timer := Hw.snd (Hw.snd s);
+  let sending := Hw.ult idx (Hw.lit 5 (List.length helloText));
+  let go := band sending (txIdle txs);
+  let txs' := txStep n txs go (rom idx 0 helloText);
+  let again := band (bnot sending) (eqLit timer (Nat.pow 2 g - 1));
+  let idx' := Hw.mux go (inc idx) (Hw.mux again (Hw.lit 5 0) idx);
+  let timer' := Hw.mux sending (Hw.lit g 0) (inc timer);
+  Hw.pair (Hw.pair txs' (Hw.pair idx' timer')) (outPack idx (txLine txs))
+
+def hello (n g : Nat) : Circuit Bit B6 :=
+  Circuit.mk (HelloS g) (TxS.init, (BitVec.ofNat 5 0, BitVec.ofNat g 0)) (fun s x => helloStep n g s)
+
+------------------------------------------------------------------------------------
+-- 3. echo: every byte received is sent back. One byte can wait while the transmitter
+--    is busy. The LEDs show the low five bits of the last byte.
+
+def EchoS : HwTy := HwTy.prod SyncS (HwTy.prod RxS (HwTy.prod TxS (HwTy.prod Bit B8)))
+
+def echoStep {r : HwTy → Type} [Hw r] (n : Nat) (s : r EchoS) (pin : r Bit) : r (HwTy.prod EchoS B6) :=
+  let sy := Hw.fst s;
+  let rxs := Hw.fst (Hw.snd s);
+  let txs := Hw.fst (Hw.snd (Hw.snd s));
+  let pv := Hw.fst (Hw.snd (Hw.snd (Hw.snd s)));
+  let pd := Hw.snd (Hw.snd (Hw.snd (Hw.snd s)));
+  let rr := rxStep n rxs (syncOut sy);
+  let valid := Hw.fst (Hw.snd rr);
+  let data := Hw.snd (Hw.snd rr);
+  let send := band pv (txIdle txs);
+  let txs' := txStep n txs send pd;
+  let pv' := Hw.mux valid hi (Hw.mux send lo pv);
+  let pd' := Hw.mux valid data pd;
+  Hw.pair (Hw.pair (syncStep sy pin) (Hw.pair (Hw.fst rr) (Hw.pair txs' (Hw.pair pv' pd'))))
+    (outPack (Hw.slice 0 5 pd) (txLine txs))
+
+def echo (n : Nat) : Circuit Bit B6 :=
+  Circuit.mk EchoS (SyncS.init, (RxS.init, (TxS.init, (BitVec.ofNat 1 0, BitVec.ofNat 8 0))))
+    (fun s x => echoStep n s x)
+
+------------------------------------------------------------------------------------
+-- 4. proto: a CRC service. The host sends a line (any bytes but 0x0A, then 0x0A); the
+--    device answers the CRC-8 of the line's bytes as two upper-case hexadecimal digits
+--    and 0x0A. LED1 … LED4 count the lines, LED5 is on.
+--
+--    State: the CRC so far, the CRC being reported, the reply phase (0: none; 1, 2:
+--    the digits; 3: the newline) and the line counter. The host must wait for the
+--    answer before it ends the next line.
+
+def ProtoS : HwTy :=
+  HwTy.prod SyncS (HwTy.prod RxS (HwTy.prod TxS (HwTy.prod B8 (HwTy.prod B8 (HwTy.prod B2 B4)))))
+
+def ledsOf {r : HwTy → Type} [Hw r] (lines : r B4) : r B5 := Hw.cat (Hw.lit 1 1 : r (HwTy.bits 1)) lines
+
+def protoStep {r : HwTy → Type} [Hw r] (n : Nat) (s : r ProtoS) (pin : r Bit) : r (HwTy.prod ProtoS B6) :=
+  let sy := Hw.fst s;
+  let rxs := Hw.fst (Hw.snd s);
+  let txs := Hw.fst (Hw.snd (Hw.snd s));
+  let crc := Hw.fst (Hw.snd (Hw.snd (Hw.snd s)));
+  let hold := Hw.fst (Hw.snd (Hw.snd (Hw.snd (Hw.snd s))));
+  let phase := Hw.fst (Hw.snd (Hw.snd (Hw.snd (Hw.snd (Hw.snd s)))));
+  let lines := Hw.snd (Hw.snd (Hw.snd (Hw.snd (Hw.snd (Hw.snd s)))));
+  let rr := rxStep n rxs (syncOut sy);
+  let valid := Hw.fst (Hw.snd rr);
+  let data := Hw.snd (Hw.snd rr);
+  let isNl := eqLit data 10;
+  let endLine := band valid isNl;
+  let dataByte := band valid (bnot isNl);
+  let crc' := Hw.mux endLine (Hw.lit 8 0) (Hw.mux dataByte (crcStep crc data) crc);
+  let hold' := Hw.mux endLine crc hold;
+  let send := band (bnot (eqLit phase 0)) (txIdle txs);
+  let phase' := Hw.mux endLine (Hw.lit 2 1) (Hw.mux send (inc phase) phase);
+  let ch := Hw.mux (eqLit phase 1) (hexDigit (Hw.slice 4 4 hold))
+    (Hw.mux (eqLit phase 2) (hexDigit (Hw.slice 0 4 hold)) (Hw.lit 8 10));
+  let txs' := txStep n txs send ch;
+  let lines' := Hw.mux endLine (inc lines) lines;
+  Hw.pair (Hw.pair (syncStep sy pin) (Hw.pair (Hw.fst rr) (Hw.pair txs' (Hw.pair crc' (Hw.pair hold'
+      (Hw.pair phase' lines'))))))
+    (outPack (ledsOf lines) (txLine txs))
+
+def proto (n : Nat) : Circuit Bit B6 :=
+  Circuit.mk ProtoS
+    (SyncS.init, (RxS.init, (TxS.init, (BitVec.ofNat 8 0, (BitVec.ofNat 8 0, (BitVec.ofNat 2 0, BitVec.ofNat 4 0))))))
+    (fun s x => protoStep n s x)
+
+------------------------------------------------------------------------------------
+-- Not for the board: pieces on their own, for the proofs and the tests.
+
+-- the baud divider alone: no input, the tick as output
+def baud (n : Nat) : Circuit None0 Bit := Circuit.mk B7 (BitVec.ofNat 7 0) (fun s u => baudStep n s)
+
+-- a transmitter wired to a receiver (through the synchroniser):
+-- input (start, byte), output (valid, byte)
+def LoopS : HwTy := HwTy.prod TxS (HwTy.prod SyncS RxS)
+def loopStep {r : HwTy → Type} [Hw r] (n : Nat) (s : r LoopS) (x : r (HwTy.prod Bit B8)) :
+    r (HwTy.prod LoopS (HwTy.prod Bit B8)) :=
+  let txs := Hw.fst s;
+  let sy := Hw.fst (Hw.snd s);
+  let rxs := Hw.snd (Hw.snd s);
+  let rr := rxStep n rxs (syncOut sy);
+  Hw.pair (Hw.pair (txStep n txs (Hw.fst x) (Hw.snd x)) (Hw.pair (syncStep sy (txLine txs)) (Hw.fst rr)))
+    (Hw.snd rr)
+def loopback (n : Nat) : Circuit (HwTy.prod Bit B8) (HwTy.prod Bit B8) :=
+  Circuit.mk LoopS (TxS.init, (SyncS.init, RxS.init)) (fun s x => loopStep n s x)
+
+-- the clock divider of the board: 12 MHz / 104 = 115384.6 baud
+def clocksPerBit : Nat := 104

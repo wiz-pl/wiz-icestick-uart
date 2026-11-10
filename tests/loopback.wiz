@@ -1,0 +1,13 @@
+-- test: run
+import Icestick.Proofs
+import IO
+-- The loopback circuit (transmitter -> synchroniser -> receiver) with the board's
+-- divider, for every byte: what `Icestick.Proofs.Loopback` proves for four bytes (and
+-- for every byte with a smaller divider), here by running the compiled circuit.
+
+def count : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ b, acc => count b (acc + Nat.ofBool (Loop.ok clocksPerBit 1100 b))
+
+def main : IO Unit :=
+  IO.println ("loopback at 104 cycles per bit: " <+> Nat.show (count 256 0) <+> " of 256 bytes received intact")

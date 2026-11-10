@@ -1,0 +1,32 @@
+-- test: run
+import Icestick.Board
+import IO
+-- The CRC service with a host whose baud rate is off. The board's bit is 104 cycles;
+-- the host's is `num/1000` cycles. The receiver samples a frame's last bit 9.5 bit
+-- periods after the start edge, so in theory it tolerates somewhat less than
+-- 0.5 / 9.5 = 5.3 % (less the cycle of jitter in the start edge and the synchroniser).
+-- The bytes that come back are decoded with the board's bit period.
+
+def lines : List (List Nat) := Gen.lines Gen.anyByte 10 8 5
+
+def ok (num : Nat) : Bool :=
+  NatList.beq
+    (Wave.decode clocksPerBit 1 (Sim.txLine (Sim.run (proto clocksPerBit)
+      (Wave.events num 1000 (.cons (Ev.idle 30) (Proto.events 3600 lines))))))
+    (Proto.replies lines)
+
+def verdict (b : Bool) : String := match b with
+  | .true => "all answers right"
+  | .false => "wrong answers"
+
+def report (label : String) (num : Nat) : IO Unit :=
+  IO.println ("host bit = " <+> Nat.show num <+> "/1000 cycles (" <+> label <+> "): " <+> verdict (ok num))
+
+def main : IO Unit := do
+  report "115200 baud exactly, board 0.16 % fast" 104167;
+  report "host 2 % fast" 101920;
+  report "host 2 % slow" 106080;
+  report "host 4 % fast" 99840;
+  report "host 4 % slow" 108160;
+  report "host 8 % fast: out of tolerance" 95680;
+  report "host 8 % slow: out of tolerance" 112320
