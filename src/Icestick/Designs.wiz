@@ -15,7 +15,7 @@ def B24 : HwTy := HwTy.bits 24
 
 def blinky : Circuit Pins.code Board.code :=
   Circuit.mk (HwTy.named "count" B24) (BitVec.ofNat 24 0)
-    (fun s x => Hw.pair (Hw.tag "count" (inc (Hw.untag s))) (board (Hw.slice 19 5 (Hw.untag s)) hi))
+    (fun s x => Hw.pair (Hw.tag "count" (inc (Hw.untag s))) (board hi (Hw.slice 19 5 (Hw.untag s))))
 
 ------------------------------------------------------------------------------------
 -- 2. hello: send a fixed string, wait 2^g cycles, again. The LEDs show the index.
@@ -39,11 +39,11 @@ def helloStep {r : HwTy → Type} [Hw r] (n g : Nat) (s : Hello g r) : r (HwTy.p
     (Hello.pack g (Hello.mk (Tx.unpack (txStep n s.tx go (rom s.idx 0 helloText)))
       (Hw.mux go (inc s.idx) (Hw.mux again (Hw.lit 5 0) s.idx))
       (Hw.mux sending (Hw.lit g 0) (inc s.timer))))
-    (board s.idx s.tx.line)
+    (board s.tx.line s.idx)
 
 def hello (n g : Nat) : Circuit Pins.code Board.code :=
   Circuit.bundled (Hello.bundle g) Pins.bundle Board.bundle (Hello.mk Tx.init (BitVec.ofNat 5 0) (BitVec.ofNat g 0))
-    (BStep.mk (fun s x => helloStep n g s))
+    (fun s x => helloStep n g s)
 
 ------------------------------------------------------------------------------------
 -- 3. echo: every byte received is sent back. One byte can wait while the transmitter
@@ -66,11 +66,11 @@ def echoStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Echo r) (x : Pins r) : r 
       (Tx.unpack (txStep n s.tx send s.byte))
       (Hw.mux got.valid hi (Hw.mux send lo s.pending))
       (Hw.mux got.valid got.data s.byte)))
-    (board (Hw.slice 0 5 s.byte) s.tx.line)
+    (board s.tx.line (Hw.slice 0 5 s.byte))
 
 def echo (n : Nat) : Circuit Pins.code Board.code :=
   Circuit.bundled Echo.bundle Pins.bundle Board.bundle
-    (Echo.mk Sync.init Rx.init Tx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0)) (BStep.mk (fun s x => echoStep n s x))
+    (Echo.mk Sync.init Rx.init Tx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0)) (echoStep n)
 
 ------------------------------------------------------------------------------------
 -- 4. proto: a CRC service. The host sends a line (any bytes but 0x0A, then 0x0A); the
@@ -107,12 +107,12 @@ def protoStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Proto r) (x : Pins r) : 
       (Hw.mux endLine s.crc s.hold)
       (Hw.mux endLine (Hw.lit 2 1) (Hw.mux send (inc s.phase) s.phase))
       (Hw.mux endLine (inc s.lines) s.lines)))
-    (board (Hw.cat (Hw.lit 1 1 : r (HwTy.bits 1)) s.lines) s.tx.line)
+    (board s.tx.line (Hw.cat (Hw.lit 1 1) s.lines))
 
 def proto (n : Nat) : Circuit Pins.code Board.code :=
   Circuit.bundled Proto.bundle Pins.bundle Board.bundle
     (Proto.mk Sync.init Rx.init Tx.init (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 2 0) (BitVec.ofNat 4 0))
-    (BStep.mk (fun s x => protoStep n s x))
+    (protoStep n)
 
 ------------------------------------------------------------------------------------
 -- Not for the board: pieces on their own, for the proofs and the tests.

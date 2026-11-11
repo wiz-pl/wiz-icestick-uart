@@ -27,8 +27,7 @@ def dec {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) : r (HwTy.
   Hw.sub x (Hw.lit n 1)
 
 -- Shift registers, least significant bit first: `b` comes in at the top.
--- (`Hw.cat` of a literal needs the ascription: FINDINGS.md G10.)
-def frame9 {r : HwTy → Type} [Hw r] (d : r B8) : r B9 := Hw.cat (Hw.lit 1 1 : r (HwTy.bits 1)) d
+def frame9 {r : HwTy → Type} [Hw r] (d : r B8) : r B9 := Hw.cat (Hw.lit 1 1) d
 def shiftIn9 {r : HwTy → Type} [Hw r] (x : r B9) (b : r Bit) : r B9 := Hw.cat b (Hw.slice 1 8 x)
 def shiftIn8 {r : HwTy → Type} [Hw r] (x : r B8) (b : r Bit) : r B8 := Hw.cat b (Hw.slice 1 7 x)
 
@@ -53,5 +52,4 @@ structure Board (r : HwTy → Type) where
   leds : r B5
   deriving Bundle
 
--- (the LEDs first: a first argument like `hi` alone does not fix `r`; FINDINGS.md G10)
-def board {r : HwTy → Type} [Hw r] (leds : r B5) (line : r Bit) : r Board.code := Board.pack (Board.mk line leds)
+def board {r : HwTy → Type} [Hw r] (line : r Bit) (leds : r B5) : r Board.code := Board.pack (Board.mk line leds)

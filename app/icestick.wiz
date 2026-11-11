@@ -18,24 +18,7 @@ import Sys
 --                  circuit, simulated cycle by cycle
 
 ------------------------------------------------------------------------------------
--- Text
-
-def Chars.beq : List Char → List Char → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Nat.beq (Char.code a) (Char.code b)) (Chars.beq as bs)
-  | _, _ => .false
-def String.chars : String → List Char
-  | .mk cs => cs
-def String.eq (a b : String) : Bool := Chars.beq (String.chars a) (String.chars b)
-
-def Chars.startsWith : List Char → List Char → Bool
-  | _, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Nat.beq (Char.code a) (Char.code b)) (Chars.startsWith as bs)
-  | .nil, .cons _ _ => .false
-def Chars.contains (needle : List Char) : List Char → Bool
-  | .nil => Chars.startsWith .nil needle
-  | .cons c cs => Bool.or (Chars.startsWith (.cons c cs) needle) (Chars.contains needle cs)
-def String.contains (s needle : String) : Bool := Chars.contains (String.chars needle) (String.chars s)
+-- Text (String.chars, String.eq, String.contains, List.take are the library's)
 
 def Chars.codes : List Char → List Nat
   | .nil => .nil
@@ -86,11 +69,6 @@ def ensureDir (p : String) : EIO Unit := do
   | .false => FS.createDir p
 
 def build (file : String) : String := "build/" <+> file
-
-def List.take {A : Type} : Nat → List A → List A
-  | .zero, _ => .nil
-  | .succ k, .nil => .nil
-  | .succ k, .cons x xs => .cons x (List.take k xs)
 
 -- the vector file, 4096 lines at a time
 def takeDrop {A : Type} : Nat → List A → List A → List A × List A

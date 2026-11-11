@@ -80,16 +80,13 @@ that grail's cache answers. Without the Cachix cache of the Wiz project as a tru
 substituter, Nix also builds wiz from source the first time (a few minutes).
 
 With tower, Wiz's toolchain manager, instead of the flake's `wiz`: `wiz-toolchain`
-names the commit this repository is developed against (master bc84b49 or later: the HDL
-library's named ports, bundles and emitters, Wiz PR #91; until tower can install a
-commit, it installs only tags and `nightly` from release tarballs, so
-`tower override set nightly` in this directory is the way to get it; on this branch the
-flake's own `wiz` (still fe4e9c4 in `flake.lock`) is too old, and the devShell is only
-for yosys, nextpnr, icestorm and iverilog), so tower's `wiz` and `grail`
-shims pick it up in this directory (`tower show`; see the Wiz documentation, stage 26).
-You then need yosys, nextpnr-ice40, icestorm, iverilog and a C compiler with GMP from
-somewhere else. Tried here as far as `tower toolchain install` from the file's spec and
-`grail targets` with that toolchain; the full build was done with the flake.
+names the commit this repository is developed against (master b6ad475, the commit
+`flake.lock` pins too; it needs Wiz PRs #91, #108 and #118 for the HDL library's named
+ports, bundles, emitters and the step functions without `BStep`). tower installs it
+from the commit's release snapshot, and its `wiz` and `grail` shims pick it up in this
+directory (`tower show`; see the Wiz documentation, stage 26). The release ships its own
+C compiler and GMP, so no `grail.local.wiz` is needed. You then need yosys,
+nextpnr-ice40, icestorm and iverilog from somewhere else (the devShell has them).
 
 The output is in `build/`: `NAME.v` (the Verilog), `NAME.bin` (the bitstream),
 `icestick.pcf`, reports and logs.
@@ -223,7 +220,7 @@ tests/                   simulation tests for `grail test`
 
 ## Versions
 
-wiz and grail `bc84b49` (2026-11-11; developed against tower's `nightly`, 5e8bbb2), yosys 0.70, nextpnr 0.11.1, icestorm
+wiz and grail `b6ad475` (2026-11-11), yosys 0.70, nextpnr 0.11.1, icestorm
 2025-06-03, Icarus Verilog 13.0, from nixpkgs `02c087f` (the Wiz flake's pin).
 
 ## Licence

@@ -17,7 +17,7 @@ def crcStep {r : HwTy → Type} [Hw r] (c d : r B8) : r B8 := crcIter 8 (Hw.xor 
 
 -- a nibble as an ASCII hexadecimal digit (upper case)
 def hexDigit {r : HwTy → Type} [Hw r] (nib : r B4) : r B8 :=
-  let z := Hw.cat (Hw.lit 4 0 : r (HwTy.bits 4)) nib;
+  let z := Hw.cat (Hw.lit 4 0) nib;
   Hw.mux (Hw.ult nib (Hw.lit 4 10)) (Hw.add z (Hw.lit 8 48)) (Hw.add z (Hw.lit 8 55))
 
 ------------------------------------------------------------------------------------

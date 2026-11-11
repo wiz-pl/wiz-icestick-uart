@@ -18,7 +18,13 @@ and friends: the loopback is `seq tx (seq sync rx)`), G5 (`Circuit.withReset`,
 every trace is replayed in full), G7 (test bench, vector, VCD and PCF emitters in the
 library), G8 (`Circuit.design : Design`, a `Type`: the designs are a `List Design`) and G9
 (the helpers are `Hdl.*`); PR #81 fixed B1 and B2, so the local Verilog emitter is gone.
-G4 and G10 remain (numerals at hardware types; a literal as first argument of `Hw.cat`).
+G4 remained (numerals at hardware types), and G10 (a literal as first argument of
+`Hw.cat`).
+
+**Since then (branch `hdl-api-108`, wiz b6ad475):** Wiz PR #92 fixed G10 in the
+elaborator, and PRs #108 and #118 removed the HDL library's workarounds for it: `BStep`
+is gone (`Circuit.bundled` takes the step function itself, `(echoStep n)`), `Hw.cat
+(Hw.lit 1 1) d` needs no ascription, and `board` takes the TX line first. G4 remains.
 The text below describes the state at fe4e9c4.
 
 ## Bugs
@@ -159,6 +165,10 @@ declared`; the types here are `B8`, `B9`, …).
 ## Gaps in the language and the elaborator
 
 ### G10. A literal as first argument does not elaborate
+
+**Fixed** by Wiz PR #92 (the library's workarounds removed by PRs #108 and #118; this
+project drops its ascriptions on branch `hdl-api-108`). The second example below was not
+re-checked.
 
 ```
 def frame9 {r : HwTy → Type} [Hw r] (d : r (HwTy.bits 8)) : r (HwTy.bits 9) :=

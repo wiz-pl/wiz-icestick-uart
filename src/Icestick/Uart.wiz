@@ -105,9 +105,9 @@ structure Line (r : HwTy → Type) where
 
 def txC (n : Nat) : Circuit Send.code Line.code :=
   Circuit.bundled Tx.bundle Send.bundle Line.bundle Tx.init
-    (BStep.mk (fun s x => Hw.pair (txStep n s x.start x.data) (Line.pack (Line.mk s.line))))
+    (fun s x => Hw.pair (txStep n s x.start x.data) (Line.pack (Line.mk s.line)))
 def syncC : Circuit Line.code Line.code :=
   Circuit.bundled Sync.bundle Line.bundle Line.bundle Sync.init
-    (BStep.mk (fun s x => Hw.pair (syncStep s x.line) (Line.pack (Line.mk s.ff2))))
+    (fun s x => Hw.pair (syncStep s x.line) (Line.pack (Line.mk s.ff2)))
 def rxC (n : Nat) : Circuit Line.code Byte.code :=
-  Circuit.bundled Rx.bundle Line.bundle Byte.bundle Rx.init (BStep.mk (fun s x => rxStep n s x.line))
+  Circuit.bundled Rx.bundle Line.bundle Byte.bundle Rx.init (fun s x => rxStep n s x.line)
