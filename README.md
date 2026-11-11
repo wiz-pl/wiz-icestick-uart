@@ -280,6 +280,27 @@ initialisation commands): the power-up order and times, the command bytes, the
 controller's registers, and every pixel of every frame against the effects evaluated
 directly. The frames are written as PPM pictures, `build/frames/oledrgb_fast_K_tT.ppm`.
 
+## Ray tracing on the PmodOLEDrgb: `sphere` and `blobs`
+
+Two more designs for the colour panel, with the same controller and pins
+(`src/Icestick/Sphere.wiz`, `src/Icestick/Blobs.wiz`; `oled flash sphere`, `oled flash
+blobs`; `oled look sphere T…` and `oled look blobs T…` render frames without the circuit).
+
+* **`sphere`**: an orange ball (radius 20) orbiting and bouncing over a checkered floor
+  that runs towards the viewer, with its shadow, under a dusk sky. Parallel rays; per
+  pixel a 12-cycle serial tracer (while the pixel before is sent): shift-and-add squares
+  of dx and dy, a bit-by-bit square root for the depth of the surface, Lambert shading
+  2h − dx − dy. An exact ray–sphere intersection, no multiplier.
+* **`blobs`**: a sphere tracer: two balls (radius 12) joined by a smooth minimum
+  (quadratic, k = 8 pixels), swinging through each other so that they merge and split.
+  A two-stage pipeline, one pixel per 32 cycles: stage A computes, for the pixel two
+  ahead, each ball's ρ = |(dx, dy)| exactly (serial squares and square root, half-pixel
+  precision); stage B marches the next pixel's ray, 16 steps, z += d, d from a
+  conservative estimate of |(ρ, z − cz)| (max(ρ, |z − cz|, 11/16 (ρ + |z − cz|)), never
+  more than the true length, exact where the ray passes closest to a centre, so the
+  outlines are true circles) through the smooth minimum (its correction term from a
+  17-entry table). Shaded by the nearer ball's normal; no floor (it did not fit).
+
 ## Building
 
 You need Nix with flakes. `nix develop` gives a shell with `wiz`, `grail` (from the

@@ -307,15 +307,20 @@ def lookSphere (ts : String) : EIO Unit := do
   FS.writeFile (build ("look/sphere_t" <+> ts <+> ".ppm")) (Ppm.of (SphRef.frame (String.toNat ts)));
   say ("t = " <+> ts)
 
+def lookBlobs (ts : String) : EIO Unit := do
+  FS.writeFile (build ("look/blobs_t" <+> ts <+> ".ppm")) (Ppm.of (BlobRef.frame (String.toNat ts)));
+  say ("t = " <+> ts)
+
 def look : List String → EIO Unit
   | .nil => EIO.fail "usage: oled look ROWS|rgb T…"
   | .cons rows ts => do
     ensureDir "build";
     ensureDir "build/look";
-    match String.eq rows "rgb", String.eq rows "sphere" with
-    | .true, _ => EIO.forEach lookRgb ts
-    | _, .true => EIO.forEach lookSphere ts
-    | _, _ => EIO.forEach (lookAt (String.toNat rows)) ts
+    match String.eq rows "rgb", String.eq rows "sphere", String.eq rows "blobs" with
+    | .true, _, _ => EIO.forEach lookRgb ts
+    | _, .true, _ => EIO.forEach lookSphere ts
+    | _, _, .true => EIO.forEach lookBlobs ts
+    | _, _, _ => EIO.forEach (lookAt (String.toNat rows)) ts
 
 def usage : String :=
   "usage: oled gen | sim | bit | postsim | all [NAME…] | flash NAME | look ROWS T…"

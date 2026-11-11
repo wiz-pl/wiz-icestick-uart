@@ -1,5 +1,5 @@
 import Icestick.DemoRgb
-import Icestick.Sphere
+import Icestick.Blobs
 import Icestick.OledSim
 -- The colour demo in simulation: pins and designs.
 
@@ -25,9 +25,11 @@ def OledRgb.designs : List Design :=
   .cons (Circuit.design "oledrgb" (demoRgb RgbCfg.board Oled.bit))
   (.cons (Circuit.design "oledrgb_fast" (demoRgb OledRgb.fast Oled.bit))
   (.cons (Circuit.design "sphere" (sphereDesign RgbCfg.board))
-  (.cons (Circuit.design "sphere_fast" (sphereDesign OledRgb.fast)) .nil)))
+  (.cons (Circuit.design "sphere_fast" (sphereDesign OledRgb.fast))
+  (.cons (Circuit.design "blobs" (blobsDesign RgbCfg.board)) .nil))))
 
-def OledRgb.isRgb (name : String) : Bool := Bool.or (String.startsWith name "oledrgb") (String.startsWith name "sphere")
+def OledRgb.isRgb (name : String) : Bool := Bool.or (String.startsWith name "oledrgb")
+  (Bool.or (String.startsWith name "sphere") (String.startsWith name "blobs"))
 def OledRgb.cfgOf (name : String) : RgbCfg := match Bool.or (Hdl.strEq name "oledrgb") (Hdl.strEq name "sphere") with
   | .true => RgbCfg.board
   | .false => OledRgb.fast
@@ -311,3 +313,28 @@ def SphRef.frame (t : Nat) : List Nat := SphRef.go t Rgb.pixels 0 .nil
 def OledRgb.refFrame (name : String) (t : Nat) : List Nat := match String.startsWith name "sphere" with
   | .true => SphRef.frame t
   | .false => RRef.frame t
+
+------------------------------------------------------------------------------------
+-- A frame of `blobs`, pixel by pixel: the two stages run on their own for each pixel
+-- (stage A from its start for 32 cycles, then stage B for 32), and its colour.
+
+def BlobRef.runA (sc : BScene HwTy.El) : Nat → StageA HwTy.El → StageA HwTy.El
+  | .zero, s => s
+  | .succ n, s => BlobRef.runA sc n (StageA.unpack (@stageAStep HwTy.El _ s (BitVec.ofNat 1 0)
+      (BitVec.ofNat 7 0) (BitVec.ofNat 6 0) sc))
+def BlobRef.runB (sc : BScene HwTy.El) (a : AOut HwTy.El) : Nat → StageB HwTy.El → StageB HwTy.El
+  | .zero, s => s
+  | .succ n, s => BlobRef.runB sc a n (StageB.unpack (@stageBStep HwTy.El _ s (BitVec.ofNat 1 0) a sc))
+
+def BlobRef.pixel (x y t : Nat) : Nat :=
+  let tt := BitVec.ofNat 9 t;
+  let sc := @BScene.at HwTy.El _ tt;
+  let a0 := StageA.unpack (@stageAStep HwTy.El _ StageA.init (BitVec.ofNat 1 1) (BitVec.ofNat 7 x) (BitVec.ofNat 6 y) sc);
+  let a := BlobRef.runA sc 31 a0;
+  let b0 := StageB.unpack (@stageBStep HwTy.El _ StageB.init (BitVec.ofNat 1 1) a.out sc);
+  BitVec.toNat (@blobColor HwTy.El _ (BlobRef.runB sc a.out 31 b0) sc (BitVec.ofNat 7 x) (BitVec.ofNat 6 y) tt)
+
+def BlobRef.go (t : Nat) : Nat → Nat → List Nat → List Nat
+  | .zero, k, acc => Hdl.reverse acc
+  | .succ n, k, acc => BlobRef.go t n (k + 1) (.cons (BlobRef.pixel (Nat.mod k 96) (Nat.div k 96) (Nat.mod t 512)) acc)
+def BlobRef.frame (t : Nat) : List Nat := BlobRef.go t Rgb.pixels 0 .nil

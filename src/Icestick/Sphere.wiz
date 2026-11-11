@@ -142,6 +142,21 @@ def Sph.depthGo : Nat → Nat → List Nat
   | .succ n, k => .cons (Nat.mod (Nat.div 96 (k + 3)) 32) (Sph.depthGo n (k + 1))
 def Sph.depthT : RomT := RomT.build 5 (Sph.depthGo 32 0)
 
+-- the floor (rows from 40: depth bands that run towards the viewer, columns that widen
+-- with the depth, a shift of x − 48 by 3, 2 or 1 places; dark where `shadow`) and the
+-- sky (dark blue at the top to purple at the horizon)
+def backdrop {r : HwTy → Type} [Hw r] (shadow : r Bit) (x : r D7) (y : r D6) (t : r D9) : r (HwTy.bits 16) :=
+  let k := Hw.sub y (Hw.lit 6 Sph.floor);
+  let depth := Rom.at 5 (Hw.slice 0 5 k) Sph.depthT;
+  let zb := Hw.slice 3 1 (Hw.add depth (Hw.slice 0 5 t));
+  let u := Hw.sub (zext 1 x) (Hw.lit 8 48);
+  let us := Hw.mux (Hw.slice 4 1 k) (Hw.slice 4 1 u) (Hw.mux (Hw.slice 3 1 k) (Hw.slice 3 1 u) (Hw.slice 2 1 u));
+  let light := Hw.xor zb us;
+  let fl := Hw.mux light (rgb565 (Hw.lit 5 14) (Hw.lit 6 30) (Hw.lit 5 10)) (rgb565 (Hw.lit 5 4) (Hw.lit 6 10) (Hw.lit 5 6));
+  let floor := Hw.mux shadow (rgb565 (Hw.lit 5 1) (Hw.lit 6 3) (Hw.lit 5 2)) fl;
+  let sky := rgb565 (Hw.slice 1 5 y) (Hw.cat (Hw.lit 2 0) (Hw.slice 2 4 y)) (Hw.add (Hw.lit 5 8) (Hw.cat lo (Hw.slice 2 4 y)));
+  Hw.mux (Hw.ult y (Hw.lit 6 Sph.floor)) sky floor
+
 -- the colour of the pixel at (x, y) from the tracer's result for it
 def sphereColor {r : HwTy → Type} [Hw r] (hit shadow : r Bit) (h : r D5) (dx dy : r D6) (x : r D7) (y : r D6) (t : r D9) : r (HwTy.bits 16) :=
   -- the ball: 2h + 14 − dx − dy, clamped to 0 … 63, orange; white above 57
@@ -151,19 +166,7 @@ def sphereColor {r : HwTy → Type} [Hw r] (hit shadow : r Bit) (h : r D5) (dx d
   let lum := Hw.mux neg (Hw.lit 6 0) (Hw.mux (Hw.slice 6 1 v) (Hw.lit 6 63) (Hw.slice 0 6 v));
   let ball := Hw.mux (Hw.ult (Hw.lit 6 57) lum) (Hw.lit 16 65535)
     (rgb565 (Hw.slice 1 5 lum) (Hw.cat lo (Hw.slice 1 5 lum)) (Hw.cat (Hw.lit 2 0) (Hw.slice 3 3 lum)));
-  -- the floor: rows from 40; depth bands that run towards the viewer, columns that
-  -- widen with the depth (a shift of x − 48 by 3, 2 or 1 places)
-  let k := Hw.sub y (Hw.lit 6 Sph.floor);
-  let depth := Rom.at 5 (Hw.slice 0 5 k) Sph.depthT;
-  let zb := Hw.slice 3 1 (Hw.add depth (Hw.slice 0 5 t));
-  let u := Hw.sub (zext 1 x) (Hw.lit 8 48);
-  let us := Hw.mux (Hw.slice 4 1 k) (Hw.slice 4 1 u) (Hw.mux (Hw.slice 3 1 k) (Hw.slice 3 1 u) (Hw.slice 2 1 u));
-  let light := Hw.xor zb us;
-  let fl := Hw.mux light (rgb565 (Hw.lit 5 14) (Hw.lit 6 30) (Hw.lit 5 10)) (rgb565 (Hw.lit 5 4) (Hw.lit 6 10) (Hw.lit 5 6));
-  let floor := Hw.mux shadow (rgb565 (Hw.lit 5 1) (Hw.lit 6 3) (Hw.lit 5 2)) fl;
-  -- the sky: dark blue at the top to purple at the horizon
-  let sky := rgb565 (Hw.slice 1 5 y) (Hw.cat (Hw.lit 2 0) (Hw.slice 2 4 y)) (Hw.add (Hw.lit 5 8) (Hw.cat lo (Hw.slice 2 4 y)));
-  Hw.mux hit ball (Hw.mux (Hw.ult y (Hw.lit 6 Sph.floor)) sky floor)
+  Hw.mux hit ball (backdrop shadow x y t)
 
 ------------------------------------------------------------------------------------
 -- The design: the colour controller, the tracer, the LEDs (LED5 on with the display,
