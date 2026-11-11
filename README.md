@@ -417,6 +417,20 @@ on J2: **the demo works on the real panel** (the user's report: the effects run 
 colour). It was flashed before any simulation of it, at the user's request; the
 simulations and proofs below were run afterwards.
 
+Afterwards (2026-11-12): `oled gen oledrgb_fast` (1.0 million cycles: values and the
+netlist) gives four frames (the stars wiping in over the plasma, the scroller, the XOR
+pattern, the plasma), each 12288 bytes into the whole panel and equal, pixel by pixel,
+to the effects evaluated directly, and the SSD1331 configured as wanted; `oledrgb` (the
+board's timing) gets through its power-up commands in 270000 cycles; the proofs in
+`src/Icestick/Proofs/OledRgb.wiz` check. The simulated frames:
+
+![simulated frames of oledrgb_fast](docs/frames/oledrgb_sim.png)
+
+Later the same evening `sphere` and then `blobs` (below) were flashed, also before any
+simulation; `blobs` works on the panel. Pictures from `oled look`:
+[sphere](docs/frames/sphere_look.png), [blobs](docs/frames/blobs_look.png); the
+monochrome demo's simulated frames: [oled_fast](docs/frames/oled_sim.png).
+
 ### Without a board
 
 `icestick fake PORT` is the board on a pseudo-terminal: each line it reads goes through

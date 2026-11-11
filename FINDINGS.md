@@ -366,6 +366,11 @@ A demo for an SSD1306 OLED (Digilent PmodOLED, 128 × 32) on the Pmod connector:
   cycles a step), the per-pixel part of the length computed exactly once per pixel in
   a separate pipeline stage, tables for the smooth minimum's square and the sphere's
   front, and no floor. Hw.mul was never used: at these widths it would not fit.
+* **G20, later.** Wiz PR #199 (agent hdl-sim-perf) adds `Design.simFast`
+  (`lib/Hdl/Sim.wiz`), about 25 times faster on `oled_fast` with the same results as
+  the value simulation. This project is pinned to b6ad475 and still uses
+  `Design.runLeaves`: `oled gen oledrgb_fast` (a million cycles) takes about half an
+  hour. Moving the pin past #199 is the obvious next step.
 * **P10 (papercut). `pkill -f PATTERN` from a shell whose command line contains the
   pattern kills that shell** (AGENTS.md warns about it; it happened once here).
 

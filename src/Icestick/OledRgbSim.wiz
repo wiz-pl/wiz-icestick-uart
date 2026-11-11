@@ -221,8 +221,9 @@ def QModel.pin (m : QModel) (c k v : Nat) : QModel := match Nat.beq k 0, Nat.beq
     | .false => QModel.setTime m T.vdd c)
   | .false, .true => m
 
+-- (a run of data still going when the trace ends is not a frame)
 def QModel.go : QModel → List SEv → QModel
-  | m, .nil => QModel.flush m
+  | m, .nil => m
   | m, .cons e es => match e with
     | .byte c dc b => QModel.go (QModel.byte m c dc b) es
     | .csHigh c => QModel.go (QModel.flush m) es
@@ -263,7 +264,7 @@ def Ppm.of (pixels : List Nat) : String := "P3\n96 64\n255\n" <+> Hdl.concat (Pp
 def OledRgb.frames : Nat := 4
 def OledRgb.cycles (name : String) : Nat := match Bool.or (Hdl.strEq name "oledrgb") (Hdl.strEq name "sphere") with
   | .true => 270000
-  | .false => 200000 + (OledRgb.frames + 1) * 196900
+  | .false => 200000 + OledRgb.frames * 196900 + 2000
 def OledRgb.input (name : String) : List (List Nat) :=
   Hdl.map (fun (b : Nat) => List.cons b List.nil) (Wave.rep (OledRgb.cycles name) 1 .nil)
 
