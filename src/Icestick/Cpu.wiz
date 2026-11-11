@@ -14,7 +14,6 @@ import Icestick.Uart
 -- `Icestick.Proofs.Cpu` proves that `coreStep` at values is `Spec.exec`, for every
 -- instruction, every state and every I/O condition.
 
-def B3 : HwTy := HwTy.bits 3
 def B12 : HwTy := HwTy.bits 12
 
 ------------------------------------------------------------------------------------

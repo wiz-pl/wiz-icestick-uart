@@ -5,6 +5,7 @@ import Hdl.Core
 
 def Bit : HwTy := HwTy.bits 1
 def B2 : HwTy := HwTy.bits 2
+def B3 : HwTy := HwTy.bits 3
 def B4 : HwTy := HwTy.bits 4
 def B5 : HwTy := HwTy.bits 5
 def B7 : HwTy := HwTy.bits 7

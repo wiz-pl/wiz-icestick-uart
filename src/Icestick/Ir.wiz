@@ -12,7 +12,6 @@ import Icestick.Uart
 -- complement (extended NEC: two address bytes, no complement). A repeat code (a key
 -- held) is a mark of 16, a space of 4 and a mark of 1.
 
-def B3 : HwTy := HwTy.bits 3
 def B6 : HwTy := HwTy.bits 6
 def B9w : HwTy := HwTy.bits 9
 def B10 : HwTy := HwTy.bits 10
