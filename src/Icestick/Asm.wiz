@@ -26,11 +26,17 @@ inductive Asm where
   | led
 
 -- pass 1: each label and its address
+-- (The recursive call is outside the `match`: with it inside, the kernel's evaluation
+-- of `Asm.labels` grows exponentially with the program: FINDINGS.md, C7.)
+def Asm.size (i : Asm) : Nat := match i with
+  | .label l => 0
+  | _ => 1
+def Asm.here (pc : Nat) (i : Asm) : List (String × Nat) := match i with
+  | .label l => .cons (l, pc) .nil
+  | _ => .nil
 def Asm.labels : Nat → List Asm → List (String × Nat)
   | pc, .nil => .nil
-  | pc, .cons i is => match i with
-    | .label l => .cons (l, pc) (Asm.labels pc is)
-    | _ => Asm.labels (Nat.succ pc) is
+  | pc, .cons i is => List.append (Asm.here pc i) (Asm.labels (pc + Asm.size i) is)
 
 def Asm.lookup (l : String) : List (String × Nat) → Option Nat
   | .nil => .none
@@ -105,39 +111,44 @@ def Asm.problemsAll (env : List (String × Nat)) : List Asm → List String
   | .nil => .nil
   | .cons i is => List.append (Asm.problem env i) (Asm.problemsAll env is)
 
+def Asm.tooLong (n : Nat) : List String := match Nat.lt 256 n with
+  | .true => .cons "more than 256 instructions" .nil
+  | .false => .nil
+
 def Asm.problems (p : List Asm) : List String :=
-  let ω size := match Nat.lt 256 (List.length (Asm.assemble p)) with
-    | .true => List.cons "more than 256 instructions" List.nil
-    | .false => List.nil;
-  List.append size (Asm.problemsAll (Asm.labels 0 p) p)
+  List.append (Asm.tooLong (List.length (Asm.assemble p))) (Asm.problemsAll (Asm.labels 0 p) p)
 
 ------------------------------------------------------------------------------------
 -- Example programs
 
--- A delay loop of about d * 517 cycles (memory cell `c` counts d … 1; the inner
--- loop runs A through 256 values, two instructions each).
-def Prog.delay (tag : String) (c d : Nat) : List Asm :=
+-- A delay of about d * m * 517 cycles (0 counts as 256): memory cell `c` counts the
+-- d outer rounds, cell c + 1 the m middle ones, and the inner loop runs A through 256
+-- values, two instructions each. d * m * 517 cycles are d * m * 43 µs at 12 MHz.
+-- (The labels are given, not made by appending to a prefix: FINDINGS.md, C7.)
+def Prog.delay (o mid i : String) (c m d : Nat) : List Asm :=
   .ldi d :: .st c ::
-  .label (tag <+> "_o") :: .ldi 0 ::
-  .label (tag <+> "_i") :: .addi 255 :: .jnz (tag <+> "_i") ::
-  .ld c :: .addi 255 :: .st c :: .jnz (tag <+> "_o") :: .nil
+  .label o :: .ldi m :: .st (c + 1) ::
+  .label mid :: .ldi 0 ::
+  .label i :: .addi 255 :: .jnz i ::
+  .ld (c + 1) :: .addi 255 :: .st (c + 1) :: .jnz mid ::
+  .ld c :: .addi 255 :: .st c :: .jnz o :: .nil
 
--- count: M[0] = 0, 1, 2, … on the LEDs, one step per `d` delays. On the board d = 23
--- (about 0.25 s per step: LED1 blinks at 2 Hz, LED5 once every 8 s).
-def Prog.count (d : Nat) : List Asm :=
+-- count: M[0] = 0, 1, 2, … on the LEDs, one step per delay. On the board m = 0 (256)
+-- and d = 23: about 0.25 s per step (LED1 blinks at 2 Hz, LED5 changes every 4 s).
+def Prog.count (m d : Nat) : List Asm :=
   .ldi 0 :: .st 0 ::
   .label "loop" :: .ld 0 :: .led :: .addi 1 :: .st 0 ::
-  List.append (Prog.delay "wait" 1 d) (.jmp "loop" :: .nil)
+  List.append (Prog.delay "wait1" "wait2" "wait3" 1 m d) (.jmp "loop" :: .nil)
 
 -- echo+1: every byte received is sent back plus one ("a" -> "b"); the LEDs show it.
 def Prog.echo : List Asm :=
   .label "loop" :: .inp :: .addi 1 :: .out :: .led :: .jmp "loop" :: .nil
 
--- hi: "hi\r\n", a pause of `d` delays, again.
-def Prog.hi (d : Nat) : List Asm :=
+-- hi: "hi\r\n", a pause, again. On the board m = 0, d = 9: about ten times a second.
+def Prog.hi (m d : Nat) : List Asm :=
   .label "top" ::
   .ldi 104 :: .out :: .ldi 105 :: .out :: .ldi 13 :: .out :: .ldi 10 :: .out ::
-  List.append (Prog.delay "pause" 0 d) (.jmp "top" :: .nil)
+  List.append (Prog.delay "pause1" "pause2" "pause3" 0 m d) (.jmp "top" :: .nil)
 
 -- countdown from k: A = k, k-1, … 0, then halt (proved: Icestick.Proofs.Cpu)
 def Prog.countdown (k : Nat) : List Asm :=

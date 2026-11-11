@@ -1,0 +1,14 @@
+assembler: count: 22 words, no problems
+assembler: echo: 5 words, no problems
+assembler: hi: 24 words, no problems
+assembler: countdown: 5 words, no problems
+assembler: bad: label defined twice: x; no memory cell 9; constant out of range: 300; unknown label nowhere; label defined twice: x
+hi: sends "hi..hi..hi."
+hi: = architecture: ok
+echo+1: 97 98 99 0 255 -> 98 99 100 1 0 
+echo+1: = architecture: ok
+echo+1: 64 bytes back to back: ok
+count: LEDs 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 
+countdown 10: after 32 steps A = 0, halted: ok
+countdown k halts after 3k + 2 steps with A = 0, for k < 256: ok
+countdown 10: hardware A after 40 cycles = 0, PC = 4

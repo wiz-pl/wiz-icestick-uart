@@ -40,7 +40,7 @@ divides its clock by 104: 115384.6 baud, 0.16 % fast.
 
 ## The designs
 
-All four are `Circuit Pins.code Board.code` values in `src/Icestick/Designs.wiz` (one
+All are `Circuit Pins.code Board.code` values, in `src/Icestick/Designs.wiz` (the CPU's in `Cpu.wiz`) (one
 Mealy machine each, state, input and output as bundles, i.e. structures of signals with
 `deriving Bundle`), built from the same parts in `src/Icestick/Uart.wiz` (baud divider,
 transmitter, receiver, input synchroniser). Every register is named after its field
@@ -52,6 +52,9 @@ transmitter, receiver, input synchroniser). Every register is named after its fi
 | `hello` | sends `Hello from Wiz!\r\n`, waits 0.35 s, again | 105 | 140 MHz |
 | `echo` | sends back every byte it receives | 79 | 216 MHz |
 | `proto` | a CRC service: see below | 125 | 191 MHz |
+| `cpu_count` | the toy CPU (below) counting on the LEDs, four steps a second | 169 | 87 MHz |
+| `cpu_echo` | the toy CPU sending back each byte plus one | 120 | 135 MHz |
+| `cpu_hi` | the toy CPU sending `hi\r\n` ten times a second | 148 | 90 MHz |
 
 The clock is 12 MHz, so timing is not a concern.
 
@@ -147,6 +150,8 @@ named-port API, has been simulated and synthesised but not run on the board.)
 | `proto` | `icestick test`, 200 random lines of up to 59 bytes | `PASS: 201 lines, every CRC as expected` (5 s) |
 | `proto` | `icestick test PORT 3000` | `PASS: 3001 lines, every CRC as expected` (50 s) |
 | `proto` | `123456789` by hand | `F4` |
+| `cpu_hi` | `timeout 2 cat` (branch `toy-cpu`) | `hi\r\n` twenty times in 2 s |
+| `cpu_echo` | the 256 byte values four times, back to back | each byte back plus one: identical to the expectation |
 
 ### Without a board
 

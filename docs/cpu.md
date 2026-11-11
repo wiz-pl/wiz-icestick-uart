@@ -7,7 +7,8 @@ the five LEDs and the serial port. It is meant to be read in an afternoon.
 ```
 src/Icestick/Cpu.wiz           the architecture (Spec.*) and the hardware (coreStep, cpu)
 src/Icestick/Asm.wiz           the assembler and the example programs
-src/Icestick/Proofs/Cpu.wiz    hardware = architecture; the ROM; small program proofs
+src/Icestick/Proofs/Cpu.wiz    hardware = architecture
+src/Icestick/Proofs/CpuProgs.wiz  the ROM; small program proofs
 tests/cpu.wiz                  the example programs in simulation
 ```
 
@@ -100,18 +101,17 @@ bytes still to come and the bytes sent so far.
 
 ## What is proved
 
-In `src/Icestick/Proofs/Cpu.wiz`, checked by the kernel on `grail build`:
+In `src/Icestick/Proofs/Cpu.wiz` and `CpuProgs.wiz`, checked by the kernel on `grail build`:
 
 * **The core is the architecture** (`Cpu.core_ok`): for every opcode (all sixteen),
   every operand, every state (PC, A, all of memory, LEDs: symbolic, not enumerated)
   and every state of the UART (transmitter ready or not, a byte waiting or not, any
   byte), one cycle of `coreStep` at values gives exactly the next state and the action
   of `Spec.exec` on the decoded instruction, a stall included.
-* **The ROM holds the program** (`Cpu.rom_count`, …): for each example program, the
-  instruction `fetch` reads at each of the 256 addresses is `Spec.fetch` of the
-  assembled program (an exhaustive check, by evaluation).
+* **The ROM holds the program** (`Cpu.rom_echo`, `Cpu.rom_hi`): for `echo` and `hi`, the instruction `fetch` reads at each of the 256 addresses is
+  `Spec.fetch` of the assembled program (an exhaustive check, by evaluation).
 * **Programs**: the countdown from k halts with A = 0 after 3k + 2 steps, for every k
-  below 256 (`Cpu.countdown_all`); `hi` sends `hi\r\n` (`Cpu.hi_sends`); `echo+1`
+  below 32 (`Cpu.countdown_00`, `_10`; the test runs all 256); `hi` sends `hi\r\n` (`Cpu.hi_sends`); `echo+1`
   answers `a b c` with `b c d` (`Cpu.echo_abc`).
 
 ### How the proof works
@@ -155,10 +155,38 @@ over 256 instructions.
 
 | program | what it does | instructions |
 |---|---|---|
-| `count` | counts on the LEDs, about four steps per second | 18 |
+| `count` | counts on the LEDs, about four steps per second | 22 |
 | `echo` | sends back each byte received plus one (`a` → `b`), shows it on the LEDs | 5 |
-| `hi` | sends `hi\r\n` about ten times per second | 21 |
+| `hi` | sends `hi\r\n` about ten times per second | 24 |
 | `countdown k` | A = k, k − 1, …, 0, then halts | 5 |
+
+## Resources and results
+
+With yosys 0.70 and nextpnr 0.11.1 (`icestick bit`), for the HX1K (1280 logic cells):
+
+| design | logic cells | block RAM | Fmax (nextpnr) |
+|---|---|---|---|
+| `cpu_count` | 169 (13 %) | 0 | 87 MHz |
+| `cpu_echo` | 120 (9 %) | 0 | 135 MHz |
+| `cpu_hi` | 148 (11 %) | 0 | 90 MHz |
+
+The ROM is constant, so yosys removes what a program cannot reach: memory cells it
+never writes, the ALU operations it never uses. A program that used everything would
+be larger; the UART alone (`echo`) is 79 cells.
+
+Every design is checked four ways by `icestick all` as the UART designs are (value
+simulation against the expected bytes, the netlist interpreter, Icarus Verilog on the
+emitted Verilog and on yosys's netlist, every cycle), and `tests/cpu.wiz` runs the
+programs on the circuit and on `Spec.step`.
+
+On the iCEstick (2026-11-11):
+
+| design | check | result |
+|---|---|---|
+| `cpu_hi` | `timeout 2 cat` | `hi\r\n` twenty times in 2 s (80 bytes, nothing else) |
+| `cpu_echo` | `printf abc` | `bcd` |
+| `cpu_echo` | the 256 byte values four times, back to back (1024 bytes) | 1024 bytes back, each the byte sent plus one (mod 256): `cmp` identical |
+| `cpu_count` | flashed and verified | the UART stays silent (0 bytes in 2 s); the LEDs were not looked at |
 
 ## Trying it
 
@@ -171,6 +199,6 @@ grail test                         # tests/cpu.wiz among them
 P=/dev/ttyUSB1; stty -F $P 115200 raw -echo cs8 -cstopb -parenb clocal min 0 time 10
 timeout 2 cat $P                   # hi, hi, hi, …
 .grail/bin/icestick flash cpu_echo
-.grail/bin/icestick cpu-echo $P    # bytes in, bytes + 1 out
-.grail/bin/icestick flash cpu_count  # and watch the LEDs
+(timeout 3 cat $P &); sleep 0.5; printf abc > $P   # bcd
+.grail/bin/icestick flash cpu_count  # and watch the LEDs count
 ```

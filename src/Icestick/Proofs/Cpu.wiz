@@ -17,10 +17,15 @@ def Cpu.port (tr rf : Bool) (rx : BitVec 8) : Port HwTy.El := Port.mk (Bool.toBi
 def Cpu.Agrees (s : Core HwTy.El) (i : Ins HwTy.El) (p : Port HwTy.El) : Prop :=
   Cpu.hw s i p = Spec.exec s (Spec.decode i) p
 
+-- n < 16, structurally (`Nat.lt` does not compute on `16 + m` for a variable `m`)
+def Cpu.below16 : Nat → Bool
+  | .succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ m))))))))))))))) => .false
+  | _ => .true
+
 -- For every opcode n < 16, UART state, CPU state `s` (symbolic: PC, A, the eight memory
 -- cells, the LEDs) and operand `k`: the hardware does what the table says. Each case
 -- is evaluation (`rfl`); `out` and `inp` are split on the flag they wait for.
-def Cpu.core_ok : (n : Nat) → Nat.lt n 16 = .true → (tr rf : Bool) → (s : Core HwTy.El) → (k rx : BitVec 8) →
+def Cpu.core_ok : (n : Nat) → Cpu.below16 n = .true → (tr rf : Bool) → (s : Core HwTy.El) → (k rx : BitVec 8) →
     Cpu.Agrees s (Ins.mk (BitVec.ofNat 4 n) k) (Cpu.port tr rf rx)
   | .zero, h, tr, rf, s, k, rx => rfl
   | .succ .zero, h, tr, rf, s, k, rx => rfl
@@ -42,39 +47,3 @@ def Cpu.core_ok : (n : Nat) → Nat.lt n 16 = .true → (tr rf : Bool) → (s : 
   | .succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ .zero)))))))))))))), h, tr, rf, s, k, rx => rfl
   | .succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ m))))))))))))))), h, tr, rf, s, k, rx => absurd h.1
 
-------------------------------------------------------------------------------------
--- The ROM holds the program: at each of the 256 addresses, the instruction `fetch`
--- reads (the multiplexer chain, at values) is the program's word, split into opcode
--- and operand (`Spec.fetch`). By evaluation, for each example program on the board.
-
-def Cpu.insEq (a b : Ins HwTy.El) : Bool := Bool.and (BitVec.beq a.op b.op) (BitVec.beq a.arg b.arg)
-def Cpu.romOk (prog : List Nat) (pc : Nat) : Bool :=
-  Cpu.insEq (@fetch HwTy.El _ prog (BitVec.ofNat 8 pc)) (Spec.fetch prog (BitVec.ofNat 8 pc))
-
-def Cpu.rom_count : allBelow 256 (Cpu.romOk Cpu.countProg) = .true := rfl
-def Cpu.rom_echo : allBelow 256 (Cpu.romOk Cpu.echoProg) = .true := rfl
-def Cpu.rom_hi : allBelow 256 (Cpu.romOk Cpu.hiProg) = .true := rfl
-
--- what a check of a whole range says about one address
-def Cpu.romAt (prog : List Nat) (h : allBelow 256 (Cpu.romOk prog) = .true)
-    (pc : Nat) (hk : Nat.lt pc 256 = .true) : Cpu.romOk prog pc = .true :=
-  allBelow_spec pc 256 (Cpu.romOk prog) h hk
-
-------------------------------------------------------------------------------------
--- Programs, on the architecture (`Spec.step`).
-
--- The countdown from k (`ldi k; l: jz done; addi 255; jmp l; done: halt`) has halted
--- after 3k + 2 steps, with A = 0: for every byte k.
-def Cpu.countdownAt (k : Nat) : Bool :=
-  let ω m := Spec.run (Asm.assemble (Prog.countdown k)) (3 * k + 2) (Arch.start .nil);
-  Bool.and (Spec.halted (Asm.assemble (Prog.countdown k)) m) (BitVec.beq m.core.acc (BitVec.ofNat 8 0))
-
-def Cpu.countdown_5 : Cpu.countdownAt 5 = .true := rfl
-def Cpu.countdown_all : allBelow 256 Cpu.countdownAt = .true := rfl
-
--- hi sends "hi\r\n" in its first eight instructions
-def Cpu.hi_sends : (Spec.run Cpu.hiProg 8 (Arch.start .nil)).output = Prog.hiText := rfl
-
--- echo+1 answers "abc" with "bcd" (and then waits for more)
-def Cpu.abc : List Nat := .cons 97 (.cons 98 (.cons 99 .nil))
-def Cpu.echo_abc : (Spec.run Cpu.echoProg 40 (Arch.start Cpu.abc)).output = Cpu.plus1 Cpu.abc := rfl

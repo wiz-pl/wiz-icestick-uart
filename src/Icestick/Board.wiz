@@ -15,9 +15,19 @@ def Board.clk : Nat := 21
 ------------------------------------------------------------------------------------
 -- The toy CPU's example programs, assembled, with the board's delays: `count` steps
 -- about four times per second, `hi` repeats about ten times per second.
-def Cpu.countProg : List Nat := Asm.assemble (Prog.count 23)
+def Cpu.countProg : List Nat := Asm.assemble (Prog.count 0 23)
 def Cpu.echoProg : List Nat := Asm.assemble Prog.echo
-def Cpu.hiProg : List Nat := Asm.assemble (Prog.hi 232)
+def Cpu.hiProg : List Nat := Asm.assemble (Prog.hi 0 9)
+
+-- The countdown from k, assembled (`Cpu.countdown_asm`), for any k
+def Cpu.countdownProg (k : Nat) : List Nat :=
+  (Op.ldi * 256 + Nat.mod k 256) :: 2308 :: 1279 :: 2049 :: 0 :: .nil
+
+-- The countdown from k (`ldi k; l: jz done; addi 255; jmp l; done: halt`) has halted
+-- after 3k + 2 steps, with A = 0 (Icestick.Proofs.CpuProgs, tests/cpu.wiz).
+def Cpu.countdownAt (k : Nat) : Bool :=
+  let ω m := Spec.run (Cpu.countdownProg k) (3 * k + 2) (Arch.start .nil);
+  Bool.and (Spec.halted (Cpu.countdownProg k) m) (BitVec.beq m.core.acc (BitVec.ofNat 8 0))
 
 -- bytes plus one
 def Cpu.plus1 : List Nat → List Nat

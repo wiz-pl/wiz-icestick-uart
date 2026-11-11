@@ -283,6 +283,98 @@ Wanted: a `Package.command`/rule target (inputs, outputs, command line), and
   first serial device (`ttyUSB0`, the SPI channel) unbound until the board is plugged
   in again. Not Wiz's doing, but a stranger will meet it (README).
 
+## The toy CPU (branch `toy-cpu`, wiz b6ad475)
+
+Found while adding the processor of docs/cpu.md.
+
+### C1. No memories in the HDL library (gap)
+
+There is no memory primitive (`NetOp` has registers, no arrays), so neither a ROM nor a
+RAM can be asked for and nothing becomes an iCE40 block RAM. The program ROM is a chain
+of multiplexers over constants (`romW`), the eight bytes of data memory are 64
+flip-flops with an 8-way read multiplexer and eight write enables. That is fine at this
+size and would not be at 256 bytes of RAM. It also means a program is part of the
+bitstream: one synthesis per program, where a block RAM's contents could be replaced in
+the bitstream (`icebram`) or loaded over the UART. Wanted: `Hw.rom (contents) addr`
+and a synchronous RAM, emitted as Verilog arrays that yosys maps to SB_RAM40_4K.
+
+### C2. Proving a circuit against a specification: what `rfl` can and cannot see (gap)
+
+`Cpu.core_ok` proves `coreStep` (at values) equal to `Spec.exec` with the state symbolic.
+It goes through by `rfl` only because of two rules the circuit had to follow:
+
+* A data-dependent bit may only be a multiplexer select. `Hw.and (Hw.lit 1 0) x` with a
+  symbolic `x` does not reduce (it is `UIntN.mk (Nat.land 0 x.toNat)`), so a stall
+  signal written `isOut & !txReady | isIn & !rxFull | isHalt` stays stuck even when the
+  opcode is known; written `mux isOut txReady (mux isIn rxFull (!isHalt))` it reduces.
+  The first form is the one a hardware designer writes.
+* The specification has to use the same multiplexer: a conditional on a symbolic bit
+  must be `HwTy.El.mux c x y` on both sides (`Spec.pick`), or the two stuck terms differ.
+
+So the proof shows the decoder, the selections and the enables right, but the shape of
+the circuit is constrained by what the kernel's evaluation happens to normalise.
+Wanted: simplification lemmas for `BitVec` at width 1 (`and 0 x = 0`, `or 1 x = 1`,
+`mux c x x = x`, …) usable by a rewriting tactic or by the conversion check, or a
+bit-blasting decision procedure for small widths.
+
+### C3. No numeric literals in patterns (papercut)
+
+`match n with | 0 => … | 1 => …` is `error: invalid pattern (term.num)`. The decoder of
+the specification matches opcodes 0 … 13 as `.succ (.succ (… .zero))`, up to fourteen
+deep (`Spec.decodeN`), and so does the proof's case split.
+
+### C4. No list literals (papercut)
+
+Programs are lists of instructions; without `[a, b, c]` they are `.cons` chains.
+`src/Icestick/Asm.wiz` declares `infixr:67 " :: " => List.cons`, which works.
+
+### C5. A conditional generic in the type cannot be applied at `BitVec 8` (papercut)
+
+`def Spec.pick {ω t : HwTy} (c : BitVec 1) (x y : HwTy.El t) : HwTy.El t` applied to
+`BitVec 8` arguments fails with `expected: HwTy.El ?t, inferred: BitVec 8 (unification
+problem is outside the pattern fragment)`: `HwTy.El` cannot be inverted, as expected,
+but every specification over values meets it. Here: a `BitVec 8` version.
+
+### C6. `let ω x := match … ; body` without a type does not elaborate (bug)
+
+```
+def Q.size (n : Nat) : List String :=
+  let ω s := match Nat.lt 256 n with
+    | .true => List.cons "big" List.nil
+    | .false => List.nil;
+  List.append s s
+-- error: type mismatch  expected: ?m0 n  inferred: List (?m1 n x✝)
+--        (a variable escapes the scope of the hole being solved)
+```
+
+The match's element type is solved inside the alternative, where the matched value is in
+scope. Here: a helper function (`Asm.tooLong`).
+
+### C7. The kernel evaluates a recursive call inside a `match` exponentially (bug)
+
+```
+inductive T where
+  | a (s : String)
+  | b
+  | c
+def f : Nat → List T → Nat
+  | k, .nil => k
+  | k, .cons t ts => match t with
+    | .a s => f k ts
+    | _ => f (Nat.succ k) ts
+def p : List T := .cons T.b (.cons T.b … .nil)   -- n elements
+def X : f 0 p = n := rfl
+```
+
+n = 12: 0.35 s, 85 MB; n = 16: 1.1 s, 140 MB; n = 20: 11 s, 910 MB (`wiz check`, one run
+each on a shared machine: rough numbers, but the growth is unmistakable). Explicit
+alternatives instead of `_`, or the same argument in both recursive calls, make no
+difference. With the recursive call outside the match (`List.append (here k t) (f (k +
+size t) ts)`) it is linear. Compiled code and `#eval` are not affected: the assembler's
+`Asm.labels` was written the first way, `#eval Asm.assemble` answered at once, and
+every proof that ran a program of 18 or more instructions went over 5 GB. Here:
+`Asm.labels` in the linear form (`Asm.here`, `Asm.size`).
+
 ## Not verified
 
 * **The pin numbers** are those of icestorm's `examples/icestick/icestick.pcf`
