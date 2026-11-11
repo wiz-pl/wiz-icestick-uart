@@ -215,5 +215,7 @@ wiz and grail `fe4e9c4` (2026-11-10), yosys 0.70, nextpnr 0.11.1, icestorm
 
 ## Licence
 
-None yet: the Wiz repository has no licence file to follow, so this is for its owner to
-decide.
+This project is free software: you can redistribute it and/or modify it under the terms of
+the GNU General Public License as published by the Free Software Foundation, either version
+3 of the License, or (at your option) any later version (SPDX: `GPL-3.0-or-later`), the
+same licence as Wiz. It is distributed WITHOUT ANY WARRANTY; see [LICENSE](LICENSE).
