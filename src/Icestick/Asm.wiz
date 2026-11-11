@@ -1,0 +1,158 @@
+import Icestick.Cpu
+-- The assembler for the toy CPU: a program is a list of `Asm` items (instructions and
+-- labels); `Asm.assemble` makes the ROM image (one word per instruction, opcode * 256
+-- + operand), which is what `cpu n prog` and `Spec.step` take. Jumps name labels; two
+-- passes: the labels' addresses, then the words. `Asm.problems` lists what is wrong
+-- with a program (an unknown or repeated label, an operand out of range, more than
+-- 256 instructions); the tests insist on none.
+
+infixr:67 " :: " => List.cons
+
+inductive Asm where
+  | label (name : String)
+  | halt
+  | ldi (k : Nat)
+  | ld (a : Nat)
+  | st (a : Nat)
+  | addi (k : Nat)
+  | add (a : Nat)
+  | sub (a : Nat)
+  | nand (a : Nat)
+  | jmp (l : String)
+  | jz (l : String)
+  | jnz (l : String)
+  | out
+  | inp
+  | led
+
+-- pass 1: each label and its address
+-- (The recursive call is outside the `match`: with it inside, the kernel's evaluation
+-- of `Asm.labels` grows exponentially with the program: FINDINGS.md, C7.)
+def Asm.size (i : Asm) : Nat := match i with
+  | .label l => 0
+  | _ => 1
+def Asm.here (pc : Nat) (i : Asm) : List (String × Nat) := match i with
+  | .label l => .cons (l, pc) .nil
+  | _ => .nil
+def Asm.labels : Nat → List Asm → List (String × Nat)
+  | pc, .nil => .nil
+  | pc, .cons i is => List.append (Asm.here pc i) (Asm.labels (pc + Asm.size i) is)
+
+def Asm.lookup (l : String) : List (String × Nat) → Option Nat
+  | .nil => .none
+  | .cons p ps => match Hdl.strEq p.1 l with
+    | .true => .some p.2
+    | .false => Asm.lookup l ps
+
+def Asm.target (env : List (String × Nat)) (l : String) : Nat := match Asm.lookup l env with
+  | .some a => a
+  | .none => 0
+
+def Asm.w (op k : Nat) : List Nat := .cons (op * 256 + Nat.mod k 256) .nil
+
+-- pass 2: the words
+def Asm.encode (env : List (String × Nat)) (i : Asm) : List Nat := match i with
+  | .label l => .nil
+  | .halt => Asm.w Op.halt 0
+  | .ldi k => Asm.w Op.ldi k
+  | .ld a => Asm.w Op.ld a
+  | .st a => Asm.w Op.st a
+  | .addi k => Asm.w Op.addi k
+  | .add a => Asm.w Op.add a
+  | .sub a => Asm.w Op.sub a
+  | .nand a => Asm.w Op.nand a
+  | .jmp l => Asm.w Op.jmp (Asm.target env l)
+  | .jz l => Asm.w Op.jz (Asm.target env l)
+  | .jnz l => Asm.w Op.jnz (Asm.target env l)
+  | .out => Asm.w Op.out 0
+  | .inp => Asm.w Op.inp 0
+  | .led => Asm.w Op.led 0
+
+def Asm.encodeAll (env : List (String × Nat)) : List Asm → List Nat
+  | .nil => .nil
+  | .cons i is => List.append (Asm.encode env i) (Asm.encodeAll env is)
+
+def Asm.assemble (p : List Asm) : List Nat := Asm.encodeAll (Asm.labels 0 p) p
+
+------------------------------------------------------------------------------------
+-- What can be wrong
+
+def Asm.countLabel (l : String) : List (String × Nat) → Nat
+  | .nil => 0
+  | .cons p ps => Nat.ofBool (Hdl.strEq p.1 l) + Asm.countLabel l ps
+
+def Asm.problem (env : List (String × Nat)) (i : Asm) : List String :=
+  let ω known := fun (l : String) => match Asm.lookup l env with
+    | .some a => List.nil
+    | .none => List.cons ("unknown label " <+> l) List.nil;
+  let ω addr := fun (a : Nat) => match Nat.lt a 8 with
+    | .true => List.nil
+    | .false => List.cons ("no memory cell " <+> Hdl.show a) List.nil;
+  let ω byte := fun (k : Nat) => match Nat.lt k 256 with
+    | .true => List.nil
+    | .false => List.cons ("constant out of range: " <+> Hdl.show k) List.nil;
+  match i with
+  | .label l => (match Nat.beq (Asm.countLabel l env) 1 with
+    | .true => .nil
+    | .false => .cons ("label defined twice: " <+> l) .nil)
+  | .ldi k => byte k
+  | .addi k => byte k
+  | .ld a => addr a
+  | .st a => addr a
+  | .add a => addr a
+  | .sub a => addr a
+  | .nand a => addr a
+  | .jmp l => known l
+  | .jz l => known l
+  | .jnz l => known l
+  | _ => .nil
+
+def Asm.problemsAll (env : List (String × Nat)) : List Asm → List String
+  | .nil => .nil
+  | .cons i is => List.append (Asm.problem env i) (Asm.problemsAll env is)
+
+def Asm.tooLong (n : Nat) : List String := match Nat.lt 256 n with
+  | .true => .cons "more than 256 instructions" .nil
+  | .false => .nil
+
+def Asm.problems (p : List Asm) : List String :=
+  List.append (Asm.tooLong (List.length (Asm.assemble p))) (Asm.problemsAll (Asm.labels 0 p) p)
+
+------------------------------------------------------------------------------------
+-- Example programs
+
+-- A delay of about d * m * 517 cycles (0 counts as 256): memory cell `c` counts the
+-- d outer rounds, cell c + 1 the m middle ones, and the inner loop runs A through 256
+-- values, two instructions each. d * m * 517 cycles are d * m * 43 µs at 12 MHz.
+-- (The labels are given, not made by appending to a prefix: FINDINGS.md, C7.)
+def Prog.delay (o mid i : String) (c m d : Nat) : List Asm :=
+  .ldi d :: .st c ::
+  .label o :: .ldi m :: .st (c + 1) ::
+  .label mid :: .ldi 0 ::
+  .label i :: .addi 255 :: .jnz i ::
+  .ld (c + 1) :: .addi 255 :: .st (c + 1) :: .jnz mid ::
+  .ld c :: .addi 255 :: .st c :: .jnz o :: .nil
+
+-- count: M[0] = 0, 1, 2, … on the LEDs, one step per delay. On the board m = 0 (256)
+-- and d = 23: about 0.25 s per step (LED1 blinks at 2 Hz, LED5 changes every 4 s).
+def Prog.count (m d : Nat) : List Asm :=
+  .ldi 0 :: .st 0 ::
+  .label "loop" :: .ld 0 :: .led :: .addi 1 :: .st 0 ::
+  List.append (Prog.delay "wait1" "wait2" "wait3" 1 m d) (.jmp "loop" :: .nil)
+
+-- echo+1: every byte received is sent back plus one ("a" -> "b"); the LEDs show it.
+def Prog.echo : List Asm :=
+  .label "loop" :: .inp :: .addi 1 :: .out :: .led :: .jmp "loop" :: .nil
+
+-- hi: "hi\r\n", a pause, again. On the board m = 0, d = 9: about ten times a second.
+def Prog.hi (m d : Nat) : List Asm :=
+  .label "top" ::
+  .ldi 104 :: .out :: .ldi 105 :: .out :: .ldi 13 :: .out :: .ldi 10 :: .out ::
+  List.append (Prog.delay "pause1" "pause2" "pause3" 0 m d) (.jmp "top" :: .nil)
+
+-- countdown from k: A = k, k-1, … 0, then halt (proved: Icestick.Proofs.Cpu)
+def Prog.countdown (k : Nat) : List Asm :=
+  .ldi k :: .label "l" :: .jz "done" :: .addi 255 :: .jmp "l" :: .label "done" :: .halt :: .nil
+
+-- the text "hi\r\n"
+def Prog.hiText : List Nat := 104 :: 105 :: 13 :: 10 :: .nil

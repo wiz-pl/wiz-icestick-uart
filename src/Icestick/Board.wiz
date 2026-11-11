@@ -1,6 +1,7 @@
 import Icestick.Designs
 import Icestick.Wave
 import Icestick.IrSim
+import Icestick.Asm
 -- The board (Lattice iCEstick, iCE40HX1K-TQ144) and the files the tools want: the pin
 -- constraints, a Verilog test bench that replays a trace, and the trace.
 
@@ -19,6 +20,28 @@ def Ir.pins : List Pin := List.append Board.pins
   (.cons (Pin.one "ir_tx" 105) (.cons (Pin.one "ir_rx" 106) (.cons (Pin.one "ir_sd" 107) .nil)))
 
 ------------------------------------------------------------------------------------
+-- The toy CPU's example programs, assembled, with the board's delays: `count` steps
+-- about four times per second, `hi` repeats about ten times per second.
+def Cpu.countProg : List Nat := Asm.assemble (Prog.count 0 23)
+def Cpu.echoProg : List Nat := Asm.assemble Prog.echo
+def Cpu.hiProg : List Nat := Asm.assemble (Prog.hi 0 9)
+
+-- The countdown from k, assembled (`Cpu.countdown_asm`), for any k
+def Cpu.countdownProg (k : Nat) : List Nat :=
+  (Op.ldi * 256 + Nat.mod k 256) :: 2308 :: 1279 :: 2049 :: 0 :: .nil
+
+-- The countdown from k (`ldi k; l: jz done; addi 255; jmp l; done: halt`) has halted
+-- after 3k + 2 steps, with A = 0 (Icestick.Proofs.CpuProgs, tests/cpu.wiz).
+def Cpu.countdownAt (k : Nat) : Bool :=
+  let ω m := Spec.run (Cpu.countdownProg k) (3 * k + 2) (Arch.start .nil);
+  Bool.and (Spec.halted (Cpu.countdownProg k) m) (BitVec.beq m.core.acc (BitVec.ofNat 8 0))
+
+-- bytes plus one
+def Cpu.plus1 : List Nat → List Nat
+  | .nil => .nil
+  | .cons b bs => .cons (Nat.mod (b + 1) 256) (Cpu.plus1 bs)
+
+------------------------------------------------------------------------------------
 -- The designs, and for each what the host does and what must come back.
 
 -- the UART bit of `ir_fast` (cycles)
@@ -30,7 +53,10 @@ def Top.designs : List Design :=
   (.cons (Circuit.design "echo" (echo clocksPerBit))
   (.cons (Circuit.design "proto" (proto clocksPerBit))
   (.cons (Circuit.design "ir" (blaster IrCfg.board clocksPerBit))
-  (.cons (Circuit.design "ir_fast" (blaster IrCfg.fast IrFast.bit)) .nil)))))
+  (.cons (Circuit.design "ir_fast" (blaster IrCfg.fast IrFast.bit))
+  (.cons (Circuit.design "cpu_count" (cpu clocksPerBit Cpu.countProg))
+  (.cons (Circuit.design "cpu_echo" (cpu clocksPerBit Cpu.echoProg))
+  (.cons (Circuit.design "cpu_hi" (cpu clocksPerBit Cpu.hiProg)) .nil))))))))
 
 def Top.isIr (name : String) : Bool := String.startsWith name "ir"
 def Top.pins (name : String) : List Pin := match Top.isIr name with
@@ -49,7 +75,7 @@ def Scenario.echoBytes : List Nat := Gen.bytes Gen.anyByte 64 99
 def Scenario.gap : Nat := 3400
 
 -- the RX pin, cycle by cycle, and the bytes the board must send, by design name
-def Top.input (name : String) : List Nat := match Hdl.strEq name "echo", Hdl.strEq name "proto" with
+def Top.input (name : String) : List Nat := match Hdl.strEq name "echo" || Hdl.strEq name "cpu_echo", Hdl.strEq name "proto" with
   -- 64 bytes back to back, then time for the last one to come back
   | .true, _ => Wave.events Host.num Host.den
       (.cons (Ev.idle 30) (Ev.bytes Scenario.echoBytes (.cons (Ev.idle 1300) .nil)))
@@ -62,9 +88,11 @@ def Top.input (name : String) : List Nat := match Hdl.strEq name "echo", Hdl.str
 def Top.expect (name : String) : List Nat := match Hdl.strEq name "echo", Hdl.strEq name "proto" with
   | .true, _ => Scenario.echoBytes
   | _, .true => Proto.replies (List.append Scenario.lines Scenario.binaryLines)
-  | _, _ => match Hdl.strEq name "hello" with
-    | .true => helloText
-    | .false => .nil
+  | _, _ => match Hdl.strEq name "hello", Hdl.strEq name "cpu_hi", Hdl.strEq name "cpu_echo" with
+    | .true, _, _ => helloText
+    | _, .true, _ => Prog.hiText
+    | _, _, .true => Cpu.plus1 Scenario.echoBytes
+    | _, _, _ => .nil
 
 ------------------------------------------------------------------------------------
 -- The IR blaster's scenarios. The host types lines (each followed by CR) and waits for

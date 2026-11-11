@@ -1,0 +1,97 @@
+-- test: run
+import Icestick.Proofs
+import Icestick.Board
+import IO
+-- The toy CPU's example programs (src/Icestick/Asm.wiz) in simulation: the whole
+-- board design (`cpu`: core, ROM, UART) on values, cycle by cycle, with the host's
+-- serial line made from bytes at 115200 baud, and the same programs on the
+-- architecture (`Spec.step`). Each must give what the program is for.
+
+def showBytes : List Nat → String
+  | .nil => ""
+  | .cons x xs => Hdl.show x <+> " " <+> showBytes xs
+
+def text : List Nat → String
+  | .nil => ""
+  | .cons x xs => String.mk (.cons (Char.mk (match Nat.lt x 32 with
+      | .true => 46
+      | .false => x)) .nil) <+> text xs
+
+-- the bytes on the TX line of `cpu prog` with the RX line `rx`
+def sent (prog : List Nat) (rx : List Nat) : List Nat :=
+  Wave.decode clocksPerBit 1 (Sim.txLine (Sim.run (cpu clocksPerBit prog) rx))
+
+-- consecutive repeats dropped: the values the LEDs go through
+def changes : Nat → List Nat → List Nat
+  | last, .nil => .nil
+  | last, .cons x xs => match Nat.beq x last with
+    | .true => changes last xs
+    | .false => .cons x (changes x xs)
+
+def ledsOf (prog : List Nat) (cycles : Nat) : List Nat :=
+  .cons 0 (changes 0 (Sim.leds (Sim.run (cpu clocksPerBit prog) (Wave.rep cycles 1 .nil))))
+
+-- the state after `k` cycles with the RX line idle
+def stateAfter {i o : HwTy} (c : Circuit i o) (x : HwTy.El i) : Nat → HwTy.El c.st → HwTy.El c.st
+  | .zero, s => s
+  | .succ k, s => stateAfter c x k (Circuit.stepEl c s x).1
+
+def cdHw : CpuSys HwTy.El :=
+  Bundle.ofEl CpuSys.bundle (stateAfter (cpu clocksPerBit (Asm.assemble (Prog.countdown 10)))
+    (HwTy.unpack Pins.code 1) 40 (cpu clocksPerBit (Asm.assemble (Prog.countdown 10))).init)
+
+def takeN : Nat → List Nat → List Nat
+  | .zero, xs => .nil
+  | .succ k, .nil => .nil
+  | .succ k, .cons x xs => .cons x (takeN k xs)
+
+def verdict (b : Bool) : String := match b with
+  | .true => "ok"
+  | .false => "WRONG"
+
+def joinWith : List String → String
+  | .nil => ""
+  | .cons a .nil => a
+  | .cons a as => a <+> "; " <+> joinWith as
+
+def problemsOf (name : String) (p : List Asm) : IO Unit := match Asm.problems p with
+  | .nil => IO.println ("assembler: " <+> name <+> ": " <+> Hdl.show (List.length (Asm.assemble p)) <+> " words, no problems")
+  | ps => IO.println ("assembler: " <+> name <+> ": " <+> joinWith ps)
+
+-- the input of echo+1: "abc", then 0 and 255 (wrap-around), with gaps
+def echoIn : List Nat := .cons 97 (.cons 98 (.cons 99 (.cons 0 (.cons 255 .nil))))
+def echoWave : List Nat :=
+  Wave.events Host.num Host.den (.cons (Ev.idle 30) (Ev.bytes echoIn (.cons (Ev.idle 1300) .nil)))
+
+-- a program with mistakes: the assembler says so
+def bad : List Asm := .label "x" :: .ld 9 :: .ldi 300 :: .jmp "nowhere" :: .label "x" :: .nil
+
+def main : IO Unit := do
+  problemsOf "count" (Prog.count 0 23);
+  problemsOf "echo" Prog.echo;
+  problemsOf "hi" (Prog.hi 0 9);
+  problemsOf "countdown" (Prog.countdown 200);
+  problemsOf "bad" bad;
+  -- hi, with a short pause: twice in 12000 cycles
+  let hi := sent (Asm.assemble (Prog.hi 1 2)) (Wave.rep 12000 1 .nil);
+  IO.println ("hi: sends \"" <+> text hi <+> "\"");
+  IO.println ("hi: = architecture: " <+> verdict (Hdl.natsEq (takeN 8 hi)
+    (takeN 8 (Spec.run (Asm.assemble (Prog.hi 1 2)) 3000 (Arch.start .nil)).output)));
+  -- echo+1
+  let e := sent Cpu.echoProg echoWave;
+  IO.println ("echo+1: " <+> showBytes echoIn <+> "-> " <+> showBytes e);
+  IO.println ("echo+1: = architecture: " <+> verdict (Hdl.natsEq e
+    (Spec.run Cpu.echoProg 100 (Arch.start echoIn)).output));
+  -- the board's echo trace (64 bytes back to back)
+  IO.println ("echo+1: 64 bytes back to back: " <+> verdict (Hdl.natsEq
+    (sent Cpu.echoProg (Top.input "cpu_echo")) (Cpu.plus1 Scenario.echoBytes)));
+  -- count, with the shortest delay: the LEDs count 0, 1, 2, …
+  IO.println ("count: LEDs " <+> showBytes (ledsOf (Asm.assemble (Prog.count 1 1)) 12000));
+  -- countdown on the architecture
+  let cd := Spec.run (Asm.assemble (Prog.countdown 10)) 32 (Arch.start .nil);
+  IO.println ("countdown 10: after 32 steps A = " <+> Hdl.show (BitVec.toNat cd.core.acc)
+    <+> ", halted: " <+> verdict (Spec.halted (Asm.assemble (Prog.countdown 10)) cd));
+  IO.println ("countdown k halts after 3k + 2 steps with A = 0, for k < 256: " <+> verdict (allBelow 256 Cpu.countdownAt));
+  -- and on the hardware: the same program, the core's A after 40 cycles
+  IO.println ("countdown 10: hardware A after 40 cycles = " <+> Hdl.show (BitVec.toNat cdHw.core.acc)
+    <+> ", PC = " <+> Hdl.show (BitVec.toNat cdHw.core.pc))

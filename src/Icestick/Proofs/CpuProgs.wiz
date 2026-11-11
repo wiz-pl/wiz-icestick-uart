@@ -1,0 +1,46 @@
+import Icestick.Proofs
+import Icestick.Board
+-- The toy CPU: its ROM holds the program, and three small programs do what they are
+-- for, on the architecture (`Spec.step`). docs/cpu.md, "What is proved".
+
+------------------------------------------------------------------------------------
+-- The ROM holds the program: at each of the 256 addresses, the instruction `fetch`
+-- reads (the multiplexer chain, at values) is the program's word, split into opcode
+-- and operand (`Spec.fetch`). By evaluation, for `echo` and `hi` (each takes the kernel
+-- minutes; `count` is left to the simulations, which compare every cycle).
+
+def Cpu.insEq (a b : Ins HwTy.El) : Bool := Bool.and (BitVec.beq a.op b.op) (BitVec.beq a.arg b.arg)
+def Cpu.romOk (prog : List Nat) (pc : Nat) : Bool :=
+  Cpu.insEq (@fetch HwTy.El _ prog (BitVec.ofNat 8 pc)) (Spec.fetch prog (BitVec.ofNat 8 pc))
+
+def Cpu.rom_echo : allBelow 256 (Cpu.romOk Cpu.echoProg) = .true := rfl
+def Cpu.rom_hi : allBelow 256 (Cpu.romOk Cpu.hiProg) = .true := rfl
+
+-- what a check of a whole range says about one address
+def Cpu.romAt (prog : List Nat) (h : allBelow 256 (Cpu.romOk prog) = .true)
+    (pc : Nat) (hk : Nat.lt pc 256 = .true) : Cpu.romOk prog pc = .true :=
+  allBelow_spec pc 256 (Cpu.romOk prog) h hk
+
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+-- Programs, on the architecture (`Spec.step`).
+
+-- the countdown (`Cpu.countdownAt`, in Board.wiz) as the assembler makes it, any k
+def Cpu.countdown_asm (k : Nat) : Asm.assemble (Prog.countdown k) = Cpu.countdownProg k := rfl
+
+-- The countdown from k has halted after 3k + 2 steps, with A = 0. Proved for k < 32
+-- (two ranges of sixteen, as the loopback: Icestick.Proofs.Loopback); tests/cpu.wiz
+-- runs every k < 256 compiled (the range 240 … 255 alone takes the kernel minutes and
+-- a gigabyte).
+
+def Cpu.countdown_5 : Cpu.countdownAt 5 = .true := rfl
+def Cpu.cdAt (base k : Nat) : Bool := Cpu.countdownAt (base + k)
+def Cpu.countdown_00 : allBelow 16 (Cpu.cdAt 0) = .true := rfl
+def Cpu.countdown_10 : allBelow 16 (Cpu.cdAt 16) = .true := rfl
+
+-- hi sends "hi\r\n" in its first eight instructions
+def Cpu.hi_sends : (Spec.run Cpu.hiProg 8 (Arch.start .nil)).output = Prog.hiText := rfl
+
+-- echo+1 answers "abc" with "bcd" (and then waits for more)
+def Cpu.abc : List Nat := .cons 97 (.cons 98 (.cons 99 .nil))
+def Cpu.echo_abc : (Spec.run Cpu.echoProg 40 (Arch.start Cpu.abc)).output = Cpu.plus1 Cpu.abc := rfl

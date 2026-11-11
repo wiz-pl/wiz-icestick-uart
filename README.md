@@ -40,7 +40,8 @@ divides its clock by 104: 115384.6 baud, 0.16 % fast.
 
 ## The designs
 
-The first four are `Circuit Pins.code Board.code` values in `src/Icestick/Designs.wiz` (one
+All are `Circuit Pins.code Board.code` values, in `src/Icestick/Designs.wiz` (the IR
+blaster's in `Blaster.wiz`, the CPU's in `Cpu.wiz`) (one
 Mealy machine each, state, input and output as bundles, i.e. structures of signals with
 `deriving Bundle`), built from the same parts in `src/Icestick/Uart.wiz` (baud divider,
 transmitter, receiver, input synchroniser). Every register is named after its field
@@ -53,8 +54,18 @@ transmitter, receiver, input synchroniser). Every register is named after its fi
 | `echo` | sends back every byte it receives | 79 | 216 MHz |
 | `proto` | a CRC service: see below | 125 | 191 MHz |
 | `ir` | the IR blaster: see below (`src/Icestick/Blaster.wiz`) | 1222 | 41 MHz |
+| `cpu_count` | the toy CPU (below) counting on the LEDs, four steps a second | 169 | 87 MHz |
+| `cpu_echo` | the toy CPU sending back each byte plus one | 120 | 135 MHz |
+| `cpu_hi` | the toy CPU sending `hi\r\n` ten times a second | 148 | 90 MHz |
 
 The clock is 12 MHz, so timing is not a concern.
+
+**A toy CPU.** `src/Icestick/Cpu.wiz` is a minimal 8-bit accumulator processor (fourteen
+instructions, eight bytes of memory, the LEDs and the UART), specified as a pure step
+function and proved equal to its circuit cycle by cycle; `src/Icestick/Asm.wiz` is its
+assembler. Three more designs run its example programs: `cpu_count` (counts on the
+LEDs), `cpu_echo` (sends back each byte plus one) and `cpu_hi` (sends `hi\r\n`). See
+[docs/cpu.md](docs/cpu.md).
 
 **The protocol of `proto`.** The host sends a line: any bytes except 0x0A, then 0x0A.
 The board answers with the CRC-8 of the line's bytes (polynomial 0x07, initial value 0:
@@ -225,6 +236,9 @@ named-port API, has been simulated and synthesised but not run on the board.)
 | `proto` | `icestick test`, 200 random lines of up to 59 bytes | `PASS: 201 lines, every CRC as expected` (5 s) |
 | `proto` | `icestick test PORT 3000` | `PASS: 3001 lines, every CRC as expected` (50 s) |
 | `proto` | `123456789` by hand | `F4` |
+| `cpu_hi` | `timeout 2 cat` (branch `toy-cpu`) | `hi\r\n` twenty times in 2 s |
+| `cpu_echo` | the 256 byte values four times, back to back | each byte back plus one: identical to the expectation |
+| `cpu_count` | flashed, looked at | the LEDs count (seen by the user) |
 
 ### The IR blaster on the board (2026-11-11)
 
@@ -344,6 +358,8 @@ src/Icestick/Gates.wiz   small vocabulary over the HDL library
 src/Icestick/Uart.wiz    baud divider, transmitter, receiver, synchroniser
 src/Icestick/Crc.wiz     CRC-8 as hardware and as a specification
 src/Icestick/Designs.wiz blinky, hello, echo, proto; the loopback circuit
+src/Icestick/Cpu.wiz     the toy CPU: architecture and circuit (docs/cpu.md)
+src/Icestick/Asm.wiz     its assembler and example programs
 src/Icestick/Wave.wiz    waveforms, a software receiver, the simulator loop, test data
 src/Icestick/Ir.wiz      NEC: specification, encoder (38 kHz carrier), decoder
 src/Icestick/Blaster.wiz the IR blaster: command line, messages, the design
