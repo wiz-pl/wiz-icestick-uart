@@ -1,4 +1,5 @@
 import Icestick.DemoRgb
+import Icestick.Sphere
 import Icestick.OledSim
 -- The colour demo in simulation: pins and designs.
 
@@ -22,9 +23,10 @@ def OledRgb.fast : RgbCfg := RgbCfg.fast 0 539
 
 def OledRgb.designs : List Design :=
   .cons (Circuit.design "oledrgb" (demoRgb RgbCfg.board Oled.bit))
-  (.cons (Circuit.design "oledrgb_fast" (demoRgb OledRgb.fast Oled.bit)) .nil)
+  (.cons (Circuit.design "oledrgb_fast" (demoRgb OledRgb.fast Oled.bit))
+  (.cons (Circuit.design "sphere" (sphereDesign RgbCfg.board)) .nil))
 
-def OledRgb.isRgb (name : String) : Bool := String.startsWith name "oledrgb"
+def OledRgb.isRgb (name : String) : Bool := Bool.or (String.startsWith name "oledrgb") (String.startsWith name "sphere")
 def OledRgb.cfgOf (name : String) : RgbCfg := match Hdl.strEq name "oledrgb" with
   | .true => RgbCfg.board
   | .false => OledRgb.fast

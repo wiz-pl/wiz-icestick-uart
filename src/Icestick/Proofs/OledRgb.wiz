@@ -1,0 +1,72 @@
+import Icestick.Proofs.Oled
+import Icestick.OledRgbSim
+-- What is proved about the colour demo (`oledrgb`). The serialiser is `spiStep`, the
+-- same function as the monochrome design's: `SpiP.inRange` and `SpiP.range_*` in
+-- `Icestick.Proofs.Oled` are about it.
+
+------------------------------------------------------------------------------------
+-- 1. The program's memory gives every entry of the program, and the program fits it.
+
+def RRomP.ok (k : Nat) : Bool :=
+  Nat.beq (bitOf (@Rom.at HwTy.El _ 9 7 (BitVec.ofNat 7 k) RProg.tree)) (Hdl.nthD 0 RProg.rom k)
+def RRomP.all : allBelow 128 RRomP.ok = .true := refl Bool.true
+def RRomP.fits : Nat.le (List.length RProg.rom) 128 = .true := refl Bool.true
+
+------------------------------------------------------------------------------------
+-- 2. The initialisation against the SSD1331's command table (`Q.run`: argument counts
+--    and what each command sets, written from the datasheet independently of
+--    `S1331.bytes`): no command left incomplete; the controller unlocked, on, 65k
+--    colours with the remap A0 72, 64 rows, external VCC, normal display, no
+--    scrolling, the whole panel as the window; the same after any frame header.
+
+def RInitP.cmds : List Nat := RProg.cmdsOf RProg.init
+def RInitP.complete : (Q.run (List.length RInitP.cmds) Q.reset RInitP.cmds).2 = (List.nil : List Nat) :=
+  refl (List.nil : List Nat)
+def RInitP.wanted : Q.wanted (Q.ofCmds RInitP.cmds) = .true := refl Bool.true
+def RInitP.header : Q.wanted (Q.ofCmds (List.append RInitP.cmds (RProg.cmdsOf RProg.loop))) = .true := refl Bool.true
+
+------------------------------------------------------------------------------------
+-- 3. The order of the power-up (PmodOLEDrgb reference manual, power-on sequence; the
+--    SSD1331 datasheet, power on sequence): PMODEN first, then its wait; a RES pulse
+--    with a wait inside; the commands after the reset, the display off among the first
+--    of them; the screen cleared before VCCEN; VCCEN, its wait, display on; the display
+--    on before the first frame. And the waits at 12 MHz: 20 ms after PMODEN, at least
+--    3 µs of RES, 100 ms after VCCEN.
+
+def RSeqP.key (s : RStep) : List Nat := match s with
+  | .send c => .cons 15 (S1331.bytes c)
+  | _ => .cons (RStep.code s) .nil
+
+def RSeqP.find (key : List Nat) : List RStep → Nat
+  | .nil => 0
+  | .cons s ss => match Hdl.natsEq (RSeqP.key s) key with
+    | .true => 0
+    | .false => Nat.succ (RSeqP.find key ss)
+
+def RSeqP.keyAt : List RStep → Nat → List Nat
+  | .nil, i => .nil
+  | .cons s ss, i => match i with
+    | .zero => RSeqP.key s
+    | .succ j => RSeqP.keyAt ss j
+
+def RSeqP.at (st : List RStep) (s : RStep) : Nat := RSeqP.find (RSeqP.key s) st
+def RSeqP.next (st : List RStep) (a b : RStep) : Bool := Hdl.natsEq (RSeqP.keyAt st (RSeqP.at st a + 1)) (RSeqP.key b)
+def RSeqP.before (st : List RStep) (a b : RStep) : Bool := Nat.lt (RSeqP.at st a) (RSeqP.at st b)
+
+def RSeqP.ok (st : List RStep) : Bool :=
+  List.all (fun (b : Bool) => b)
+    (.cons (Nat.beq (RSeqP.at st RStep.vddOn) 0) (.cons (RSeqP.next st RStep.vddOn RStep.waitVdd)
+    (.cons (RSeqP.next st RStep.resLow RStep.waitRes) (.cons (Nat.beq (RSeqP.at st RStep.resLow + 2) (RSeqP.at st RStep.resHigh))
+    (.cons (RSeqP.before st RStep.resHigh (RStep.send S1331.unlock))
+    (.cons (Nat.lt (RSeqP.at st (RStep.send S1331.displayOff)) (RSeqP.at st RStep.resHigh + 4))
+    (.cons (RSeqP.before st RStep.blank RStep.vccOn)
+    (.cons (RSeqP.next st RStep.vccOn RStep.waitVcc) (.cons (RSeqP.next st RStep.waitVcc (RStep.send S1331.displayOn))
+    (.cons (RSeqP.before st (RStep.send S1331.displayOn) RStep.frame) (.cons (RSeqP.before st RStep.frame RStep.pixels)
+    .nil)))))))))))
+
+def RSeqP.board : RSeqP.ok RProg.steps = .true := refl Bool.true
+
+def RSeqP.timing : Bool :=
+  Bool.and (Nat.le 240000 (RgbCfg.tVdd RgbCfg.board)) (Bool.and (Nat.le 36 (RgbCfg.tRes RgbCfg.board)) (Nat.le 1200000 (RgbCfg.tVcc RgbCfg.board)))
+def RSeqP.times : RSeqP.timing = .true := refl Bool.true
+def RSeqP.fastRes : Nat.le 36 (RgbCfg.tRes OledRgb.fast) = .true := refl Bool.true
