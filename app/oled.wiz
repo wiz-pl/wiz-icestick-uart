@@ -15,7 +15,7 @@ import Sys
 --   flash NAME     write build/NAME.bin to the board (iceprog)
 --   quick [NAME…] only the Verilog and the pin constraints (no simulation), for `bit`
 --   look ROWS T…   the effects at frame counter values T, without the circuit (quick);
---                  ROWS = rgb: the colour effects, as build/look/rgb_tT.ppm
+--                  ROWS = rgb: the colour effects, as build/look/rgb_tT.ppm; sphere: the ball
 
 def say (s : String) : EIO Unit := EIO.lift (IO.println s)
 
@@ -132,19 +132,19 @@ def checkModel (name : String) (c : OledCfg) (m : Model) : EIO Unit := do
 ------------------------------------------------------------------------------------
 -- The colour demo (SSD1331)
 
-def rgbFile (k t : Nat) : String :=
-  build ("frames/oledrgb_fast_" <+> Hdl.show k <+> "_t" <+> Hdl.show t <+> ".ppm")
+def rgbFile (name : String) (k t : Nat) : String :=
+  build ("frames/" <+> name <+> "_" <+> Hdl.show k <+> "_t" <+> Hdl.show t <+> ".ppm")
 
-def checkRgbFrames (c : RgbCfg) : Nat → List QFrame → EIO Unit
+def checkRgbFrames (name : String) (c : RgbCfg) : Nat → List QFrame → EIO Unit
   | k, .nil => EIO.pure ()
   | k, .cons f fs => do
     let t := RRef.time c k;
-    FS.writeFile (rgbFile k t) (Ppm.of f.pixels);
+    FS.writeFile (rgbFile name k t) (Ppm.of f.pixels);
     check ("frame " <+> Hdl.show k <+> " (t = " <+> Hdl.show t <+> ", effect " <+> Hdl.show (Nat.div t 512)
       <+> ", at cycle " <+> Hdl.show f.cycle <+> "): " <+> Hdl.show f.bytes
       <+> " data bytes into the whole panel, every pixel as the effect's")
-      (Bool.and (Bool.and f.full (Nat.beq f.bytes (2 * Rgb.pixels))) (Hdl.natsEq f.pixels (RRef.frame t)));
-    checkRgbFrames c (k + 1) fs
+      (Bool.and (Bool.and f.full (Nat.beq f.bytes (2 * Rgb.pixels))) (Hdl.natsEq f.pixels (OledRgb.refFrame name t)));
+    checkRgbFrames name c (k + 1) fs
 
 def expectRgbCmds (k : Nat) : List Nat :=
   List.append (RProg.cmdsOf RProg.init) (repeatList k (RProg.cmdsOf RProg.loop))
@@ -161,7 +161,7 @@ def checkRgbModel (name : String) (c : RgbCfg) (m : QModel) : EIO Unit := do
   check "the RES pulse is at least tRes cycles (and 3 µs = 36 cycles) long"
     (Bool.and (Nat.le (R.get ts T.resLo + c.tRes) (R.get ts T.resHi)) (Nat.le (R.get ts T.resLo + 36) (R.get ts T.resHi)));
   check "the command bytes are the program's, in order" (isPrefix cmds (expectRgbCmds (List.length frames + 1)));
-  match Hdl.strEq name "oledrgb" with
+  match Bool.or (Hdl.strEq name "oledrgb") (Hdl.strEq name "sphere") with
   | .true => check "the power-up got through the initialisation commands"
       (Nat.le (List.length (RProg.cmdsOf RProg.init) - 1) (List.length cmds))
   | .false => do
@@ -169,7 +169,7 @@ def checkRgbModel (name : String) (c : RgbCfg) (m : QModel) : EIO Unit := do
       (Bool.and (Nat.lt (R.get ts T.resHi) (R.get ts T.vbat)) (Nat.le (R.get ts T.vbat + c.tVcc) (R.get ts T.on)));
     check "the SSD1331's registers as the demo wants them" (Q.wanted m.regs);
     check ("all " <+> Hdl.show OledRgb.frames <+> " frames shown") (Nat.le OledRgb.frames (List.length frames));
-    checkRgbFrames c 1 frames
+    checkRgbFrames name c 1 frames
 
 def genRgb (d : Design) : EIO Unit := do
   let name := d.name;
@@ -303,14 +303,19 @@ def lookRgb (ts : String) : EIO Unit := do
   FS.writeFile (build ("look/rgb_t" <+> ts <+> ".ppm")) (Ppm.of (RRef.frame (String.toNat ts)));
   say ("t = " <+> ts)
 
+def lookSphere (ts : String) : EIO Unit := do
+  FS.writeFile (build ("look/sphere_t" <+> ts <+> ".ppm")) (Ppm.of (SphRef.frame (String.toNat ts)));
+  say ("t = " <+> ts)
+
 def look : List String → EIO Unit
   | .nil => EIO.fail "usage: oled look ROWS|rgb T…"
   | .cons rows ts => do
     ensureDir "build";
     ensureDir "build/look";
-    match String.eq rows "rgb" with
-    | .true => EIO.forEach lookRgb ts
-    | .false => EIO.forEach (lookAt (String.toNat rows)) ts
+    match String.eq rows "rgb", String.eq rows "sphere" with
+    | .true, _ => EIO.forEach lookRgb ts
+    | _, .true => EIO.forEach lookSphere ts
+    | _, _ => EIO.forEach (lookAt (String.toNat rows)) ts
 
 def usage : String :=
   "usage: oled gen | sim | bit | postsim | all [NAME…] | flash NAME | look ROWS T…"

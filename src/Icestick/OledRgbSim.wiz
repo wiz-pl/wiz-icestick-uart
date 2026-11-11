@@ -24,10 +24,11 @@ def OledRgb.fast : RgbCfg := RgbCfg.fast 0 539
 def OledRgb.designs : List Design :=
   .cons (Circuit.design "oledrgb" (demoRgb RgbCfg.board Oled.bit))
   (.cons (Circuit.design "oledrgb_fast" (demoRgb OledRgb.fast Oled.bit))
-  (.cons (Circuit.design "sphere" (sphereDesign RgbCfg.board)) .nil))
+  (.cons (Circuit.design "sphere" (sphereDesign RgbCfg.board))
+  (.cons (Circuit.design "sphere_fast" (sphereDesign OledRgb.fast)) .nil)))
 
 def OledRgb.isRgb (name : String) : Bool := Bool.or (String.startsWith name "oledrgb") (String.startsWith name "sphere")
-def OledRgb.cfgOf (name : String) : RgbCfg := match Hdl.strEq name "oledrgb" with
+def OledRgb.cfgOf (name : String) : RgbCfg := match Bool.or (Hdl.strEq name "oledrgb") (Hdl.strEq name "sphere") with
   | .true => RgbCfg.board
   | .false => OledRgb.fast
 
@@ -258,8 +259,55 @@ def Ppm.of (pixels : List Nat) : String := "P3\n96 64\n255\n" <+> Hdl.concat (Pp
 -- and the commands up to the clear screen); `oledrgb_fast` until four frames are shown.
 
 def OledRgb.frames : Nat := 4
-def OledRgb.cycles (name : String) : Nat := match Hdl.strEq name "oledrgb" with
+def OledRgb.cycles (name : String) : Nat := match Bool.or (Hdl.strEq name "oledrgb") (Hdl.strEq name "sphere") with
   | .true => 270000
   | .false => 200000 + (OledRgb.frames + 1) * 196900
 def OledRgb.input (name : String) : List (List Nat) :=
   Hdl.map (fun (b : Nat) => List.cons b List.nil) (Wave.rep (OledRgb.cycles name) 1 .nil)
+
+------------------------------------------------------------------------------------
+-- What a frame of `sphere` must be: the same scene and colours, but the ray test, the
+-- squares and the square root done on numbers (the tracer does them serially in
+-- hardware).
+
+def SphRef.isqrtGo (m : Nat) : Nat → Nat → Nat
+  | .zero, h => h
+  | .succ k, h => match Nat.le ((h + 1) * (h + 1)) m with
+    | .true => SphRef.isqrtGo m k (h + 1)
+    | .false => h
+def SphRef.isqrt (m : Nat) : Nat := SphRef.isqrtGo m 64 0
+
+-- |a − b| and a − b as 6-bit two's complement
+def SphRef.dist (a b : Nat) : Nat := match Nat.lt a b with
+  | .true => b - a
+  | .false => a - b
+def SphRef.tc6 (a b : Nat) : Nat := Nat.mod (a + 64 - Nat.mod b 64) 64
+
+def SphRef.pixel (x y t : Nat) : Nat :=
+  let sc := @Scene.at HwTy.El _ (BitVec.ofNat 9 t);
+  let cx := BitVec.toNat sc.cx;
+  let cy := BitVec.toNat sc.cy;
+  let ax := SphRef.dist x cx;
+  let ay := SphRef.dist y cy;
+  let az := SphRef.dist y Sph.shadowY;
+  let r2 := ax * ax + ay * ay;
+  let hit := Bool.and (Bool.and (Nat.le ax 31) (Nat.le ay 31)) (Nat.le r2 Sph.r2);
+  let shadow := Bool.and (Bool.and (Nat.le ax 31) (Nat.le az 7)) (Nat.le (ax * ax + 16 * az * az) Sph.r2);
+  let h := match hit with
+    | .true => SphRef.isqrt (Sph.r2 - r2)
+    | .false => 0;
+  let b := fun (v : Bool) => BitVec.ofNat 1 (match v with
+    | .true => 1
+    | .false => 0);
+  BitVec.toNat (@sphereColor HwTy.El _ (b hit) (b shadow) (BitVec.ofNat 5 h) (BitVec.ofNat 6 (SphRef.tc6 x cx))
+    (BitVec.ofNat 6 (SphRef.tc6 y cy)) (BitVec.ofNat 7 x) (BitVec.ofNat 6 y) (BitVec.ofNat 9 t))
+
+def SphRef.go (t : Nat) : Nat → Nat → List Nat → List Nat
+  | .zero, k, acc => Hdl.reverse acc
+  | .succ n, k, acc => SphRef.go t n (k + 1) (.cons (SphRef.pixel (Nat.mod k 96) (Nat.div k 96) (Nat.mod t 512)) acc)
+def SphRef.frame (t : Nat) : List Nat := SphRef.go t Rgb.pixels 0 .nil
+
+-- the frame design `name` must show at frame counter t
+def OledRgb.refFrame (name : String) (t : Nat) : List Nat := match String.startsWith name "sphere" with
+  | .true => SphRef.frame t
+  | .false => RRef.frame t
