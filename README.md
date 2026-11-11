@@ -228,7 +228,7 @@ named-port API, has been simulated and synthesised but not run on the board.)
 
 ### The IR blaster on the board (2026-11-11)
 
-Flashed `ir` (1202 of 1280 logic cells, 44 MHz), then over `/dev/ttyUSB1`:
+First version (1202 of 1280 logic cells, 44 MHz, no repeat codes), over `/dev/ttyUSB1`:
 
 ```
 ir> help                on off power raw AA[AA] CC listen
@@ -246,6 +246,11 @@ ir> listen              listening, key stops   (no remote at hand: nothing; a ke
 turned it back into the frame sent, so the LED was driven with NEC timing. Whether a TV
 reacts was not observed (no TV in reach of the board), nor whether the IrDA receiver
 sees a 940 nm remote (`listen` with an LG remote a few centimetres away will tell).
+
+With an LG TV in front of the board (the user watching): `on` and `off` switched it on
+and off; a single `power` frame did nothing. Hence the repeat codes. Second version
+(1222 cells), 21:45:41: `power` → `sent 04 FB 08 F7 (20DF10EF) +4, echo ok`; the TV's
+reaction to the five-code press had not been reported when this was written.
 
 ### Without a board
 
