@@ -1,0 +1,66 @@
+import Icestick.FxRgb
+import Icestick.Demo
+-- The demo on a Digilent PmodOLEDrgb (SSD1331, 96 × 64, 16-bit colour): the controller
+-- of `Icestick.OledRgb` streaming the colour effects of `Icestick.FxRgb`, the LEDs and
+-- the one-key prompt as in `Icestick.Demo` (`1` … `4` keep an effect, `0` the sequence).
+--
+-- Pins (`OledRgb.pins` in `Icestick.OledRgbSim`): Pmod J2 as the PmodOLEDrgb's J1:
+-- 1 CS, 2 MOSI, 4 SCK, 7 D/C, 8 RES, 9 VCCEN, 10 PMODEN (both high: on).
+
+structure RgbBoard (r : HwTy → Type) where
+  uart_tx : r Bit
+  leds : r B5
+  oled_cs : r Bit
+  oled_mosi : r Bit
+  oled_sclk : r Bit
+  oled_dc : r Bit
+  oled_res : r Bit
+  oled_vccen : r Bit
+  oled_pmoden : r Bit
+  deriving Bundle
+
+-- the key on the serial port
+structure Key (r : HwTy → Type) where
+  sync : Sync r
+  rx : Rx r
+  lock : r Bit
+  sel : r D2
+  deriving Bundle
+
+structure DemoRgb (fl : Nat) (r : HwTy → Type) where
+  ctl : RCtl fl r
+  key : Key r
+  deriving Bundle
+
+def DemoRgb.init (c : RgbCfg) : DemoRgb c.frameLog HwTy.El :=
+  DemoRgb.mk (RCtl.init c) (Key.mk Sync.init Rx.init (BitVec.ofNat 1 0) (BitVec.ofNat 2 0))
+
+def keyStep {r : HwTy → Type} [Hw r] (n : Nat) (k : Key r) (pin : r Bit) : r Key.code :=
+  let rr := rxStep n k.rx k.sync.ff2;
+  let got := Byte.unpack (Hw.snd rr);
+  let d := got.data;
+  let digit := band got.valid (band (eqLit (Hw.slice 3 5 d) 6) (Hw.ult (Hw.slice 0 3 d) (Hw.lit 3 5)));
+  Key.pack (Key.mk (Sync.unpack (syncStep k.sync pin)) (Rx.unpack (Hw.fst rr))
+    (Hw.mux digit (bnot (eqLit (Hw.slice 0 3 d) 0)) k.lock)
+    (Hw.mux digit (dec (Hw.slice 0 2 d)) k.sel))
+
+-- the frame counter t (11 bits): effect t[10:9], time within it t[8:0]
+def demoRgbStep {r : HwTy → Type} [Hw r] (c : RgbCfg) (n : Nat) (rom : RomT) (s : DemoRgb c.frameLog r) (x : OledPins r)
+    : r (HwTy.prod (DemoRgb.code c.frameLog) RgbBoard.code) :=
+  let cs := s.ctl;
+  let t := cs.fr.t;
+  let e := Hw.mux s.key.lock s.key.sel (Hw.slice 9 2 t);
+  let color := rgbPixel e cs.gen.x cs.gen.y (Hw.slice 0 9 t);
+  let level := Hw.slice 1 4 (sin6 (Hw.slice 0 6 t));
+  let on := Hw.ult (Hw.slice 0 4 cs.fr.timer) level;
+  let oneHot := Hw.cat (band (eqLit e 3) on) (Hw.cat (band (eqLit e 2) on) (Hw.cat (band (eqLit e 1) on) (band (eqLit e 0) on)));
+  let p := cs.pins;
+  Hw.pair
+    (DemoRgb.pack c.frameLog (DemoRgb.mk (RCtl.unpack c.frameLog (rctlStep c rom cs color))
+      (Key.unpack (keyStep n s.key x.uart_rx))))
+    (RgbBoard.pack (RgbBoard.mk hi (Hw.cat (rctlShowing cs) oneHot)
+      p.cs cs.spi.mosi cs.spi.sclk p.dc p.res p.vccen p.pmoden))
+
+def demoRgb (c : RgbCfg) (n : Nat) : Circuit OledPins.code RgbBoard.code :=
+  let rom := RProg.tree;
+  Circuit.bundled (DemoRgb.bundle c.frameLog) OledPins.bundle RgbBoard.bundle (DemoRgb.init c) (demoRgbStep c n rom)

@@ -1,0 +1,334 @@
+import Icestick.OledRgbSim
+import Sys
+-- The flow driver of the OLED demo: `oled COMMAND`. Like `icestick` (app/icestick.wiz),
+-- whose steps it repeats, for the designs of `Icestick.OledSim` (`oled`, `oled64`,
+-- `oled_fast`, `oled64_fast`).
+--
+--   gen [NAME…]    simulate each design (values, then the netlist), decode its pins with
+--                  the SSD1306 model, check the power-up, the commands and every frame;
+--                  write build/NAME.v, .pcf, the test bench and the trace, and the
+--                  frames as build/frames/NAME_K_tT.pbm
+--   sim [NAME…]    replay the traces on the Verilog with Icarus Verilog
+--   bit [NAME…]    synthesise, place and route, pack; timing report
+--   postsim [NAME…] replay the traces on the synthesised netlists
+--   all [NAME…]    gen, sim, bit, postsim
+--   flash NAME     write build/NAME.bin to the board (iceprog)
+--   quick [NAME…] only the Verilog and the pin constraints (no simulation), for `bit`
+--   look ROWS T…   the effects at frame counter values T, without the circuit (quick);
+--                  ROWS = rgb: the colour effects, as build/look/rgb_tT.ppm
+
+def say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def EIO.forEach {A : Type} (f : A → EIO Unit) : List A → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons x xs => EIO.bind (f x) (fun u => EIO.forEach f xs)
+
+def unwords : List String → String
+  | .nil => ""
+  | .cons a as => a <+> " " <+> unwords as
+
+def tool (cmd : String) (args : List String) : EIO Unit := do
+  say ("$ " <+> cmd <+> " " <+> unwords args);
+  st ← Process.run cmd args;
+  match ExitStatus.success st with
+  | .true => EIO.pure ()
+  | .false => EIO.fail (cmd <+> ": " <+> ExitStatus.toString st)
+
+def toolOutput (cmd : String) (args : List String) : EIO String := do
+  say ("$ " <+> cmd <+> " " <+> unwords args);
+  o ← Process.output cmd args "";
+  match ExitStatus.success o.status with
+  | .true => EIO.pure o.stdout
+  | .false => EIO.fail (cmd <+> ": " <+> ExitStatus.toString o.status <+> "\n" <+> o.stdout <+> o.stderr)
+
+def ensureDir (p : String) : EIO Unit := do
+  d ← EIO.lift (FS.isDir p);
+  match d with
+  | .true => EIO.pure ()
+  | .false => FS.createDir p
+
+def build (file : String) : String := "build/" <+> file
+
+def takeDrop {A : Type} : Nat → List A → List A → List A × List A
+  | .zero, xs, acc => (Hdl.reverse acc, xs)
+  | .succ k, .nil, acc => (Hdl.reverse acc, .nil)
+  | .succ k, .cons x xs, acc => takeDrop k xs (.cons x acc)
+def writeVec (path : String) : Nat → List String → EIO Unit
+  | .zero, _ => EIO.pure ()
+  | .succ fuel, ls => match ls with
+    | .nil => EIO.pure ()
+    | .cons _ _ =>
+      let ω r := takeDrop 4096 ls .nil;
+      EIO.bind (FS.appendFile path (Hdl.concat r.1)) (fun u => writeVec path fuel r.2)
+
+def leavesEq : List (List Nat) → List (List Nat) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
+  | _, _ => .false
+
+def check (what : String) (ok : Bool) : EIO Unit := match ok with
+  | .true => say ("  ok: " <+> what)
+  | .false => EIO.fail ("FAILED: " <+> what)
+
+def isPrefix : List Nat → List Nat → Bool
+  | .nil, _ => .true
+  | .cons a as, .cons b bs => Bool.and (Nat.beq a b) (isPrefix as bs)
+  | .cons _ _, .nil => .false
+
+def repeatList {A : Type} : Nat → List A → List A
+  | .zero, xs => .nil
+  | .succ k, xs => List.append xs (repeatList k xs)
+
+------------------------------------------------------------------------------------
+-- The checks of a run
+
+def showNats : List Nat → String
+  | .nil => ""
+  | .cons x xs => Hdl.show x <+> " " <+> showNats xs
+
+-- the command bytes the program sends, for `k` frames
+def expectCmds (c : OledCfg) (k : Nat) : List Nat :=
+  List.append (Prog.cmdsOf (Prog.init c)) (repeatList k (Prog.cmdsOf (Prog.loop c)))
+
+def frameFile (name : String) (k t : Nat) : String :=
+  build ("frames/" <+> name <+> "_" <+> Hdl.show k <+> "_t" <+> Hdl.show t <+> ".pbm")
+
+-- each frame: complete, and the effect's, pixel by pixel; its picture
+def checkFrames (name : String) (c : OledCfg) : Nat → List Frame → EIO Unit
+  | k, .nil => EIO.pure ()
+  | k, .cons f fs => do
+    let t := Ref.time c f.cycle;
+    let e := Oled.effectOf name c f.cycle;
+    let got := List.take (OledCfg.bytes c) f.ram;
+    FS.writeFile (frameFile name k t) (Pbm.of c.rows f.ram);
+    check ("frame " <+> Hdl.show k <+> " (t = " <+> Hdl.show t <+> ", effect " <+> Hdl.show e
+      <+> ", at cycle " <+> Hdl.show f.cycle <+> "): " <+> Hdl.show f.bytes <+> " data bytes, every pixel as the effect's")
+      (Bool.and (Nat.beq f.bytes (OledCfg.bytes c)) (Hdl.natsEq got (Ref.frame c e (Nat.mod t 512))));
+    checkFrames name c (k + 1) fs
+
+def checkModel (name : String) (c : OledCfg) (m : Model) : EIO Unit := do
+  let ts := m.times;
+  let cmds := Hdl.reverse m.cmds;
+  let frames := Hdl.reverse m.frames;
+  say ("  VDD on at " <+> Hdl.show (R.get ts T.vdd) <+> ", RES low " <+> Hdl.show (R.get ts T.resLo)
+    <+> " … " <+> Hdl.show (R.get ts T.resHi) <+> ", first byte " <+> Hdl.show (R.get ts T.first)
+    <+> ", VBAT on " <+> Hdl.show (R.get ts T.vbat) <+> ", display on " <+> Hdl.show (R.get ts T.on)
+    <+> "; " <+> Hdl.show (List.length cmds) <+> " command bytes, " <+> Hdl.show (List.length frames) <+> " frames");
+  check "VDD on before the first byte, by at least tVdd cycles"
+    (Nat.le (R.get ts T.vdd + c.tVdd) (R.get ts T.first));
+  check "the RES pulse is at least tVdd cycles (and 3 µs = 36 cycles) long"
+    (Bool.and (Nat.le (R.get ts T.resLo + c.tVdd) (R.get ts T.resHi)) (Nat.le (R.get ts T.resLo + 36) (R.get ts T.resHi)));
+  check "the command bytes are the program's, in order" (isPrefix cmds (expectCmds c (List.length frames + 1)));
+  match Oled.isBoard name with
+  | .true => check "the power-up got as far as the clear screen (all initialisation commands sent)"
+      (Nat.le (List.length (Prog.cmdsOf (Prog.init c)) - 1) (List.length cmds))
+  | .false => do
+    check "VBAT on after RES, display on at least tVbat cycles after VBAT"
+      (Bool.and (Nat.lt (R.get ts T.resHi) (R.get ts T.vbat)) (Nat.le (R.get ts T.vbat + c.tVbat) (R.get ts T.on)));
+    check "the SSD1306's registers as the demo wants them" (Ssd.wanted c.rows m.regs);
+    check ("all " <+> Hdl.show (Oled.frames name) <+> " frames shown") (Nat.le (Oled.frames name) (List.length frames));
+    checkFrames name c 1 frames
+
+------------------------------------------------------------------------------------
+-- The colour demo (SSD1331)
+
+def rgbFile (k t : Nat) : String :=
+  build ("frames/oledrgb_fast_" <+> Hdl.show k <+> "_t" <+> Hdl.show t <+> ".ppm")
+
+def checkRgbFrames (c : RgbCfg) : Nat → List QFrame → EIO Unit
+  | k, .nil => EIO.pure ()
+  | k, .cons f fs => do
+    let t := RRef.time c k;
+    FS.writeFile (rgbFile k t) (Ppm.of f.pixels);
+    check ("frame " <+> Hdl.show k <+> " (t = " <+> Hdl.show t <+> ", effect " <+> Hdl.show (Nat.div t 512)
+      <+> ", at cycle " <+> Hdl.show f.cycle <+> "): " <+> Hdl.show f.bytes
+      <+> " data bytes into the whole panel, every pixel as the effect's")
+      (Bool.and (Bool.and f.full (Nat.beq f.bytes (2 * Rgb.pixels))) (Hdl.natsEq f.pixels (RRef.frame t)));
+    checkRgbFrames c (k + 1) fs
+
+def expectRgbCmds (k : Nat) : List Nat :=
+  List.append (RProg.cmdsOf RProg.init) (repeatList k (RProg.cmdsOf RProg.loop))
+
+def checkRgbModel (name : String) (c : RgbCfg) (m : QModel) : EIO Unit := do
+  let ts := m.times;
+  let cmds := Hdl.reverse m.cmds;
+  let frames := Hdl.reverse m.frames;
+  say ("  PMODEN on at " <+> Hdl.show (R.get ts T.vdd) <+> ", RES low " <+> Hdl.show (R.get ts T.resLo)
+    <+> " … " <+> Hdl.show (R.get ts T.resHi) <+> ", first byte " <+> Hdl.show (R.get ts T.first)
+    <+> ", VCCEN on " <+> Hdl.show (R.get ts T.vbat) <+> ", display on " <+> Hdl.show (R.get ts T.on)
+    <+> "; " <+> Hdl.show (List.length cmds) <+> " command bytes, " <+> Hdl.show (List.length frames) <+> " frames");
+  check "PMODEN on before the first byte, by at least tVdd cycles" (Nat.le (R.get ts T.vdd + c.tVdd) (R.get ts T.first));
+  check "the RES pulse is at least tRes cycles (and 3 µs = 36 cycles) long"
+    (Bool.and (Nat.le (R.get ts T.resLo + c.tRes) (R.get ts T.resHi)) (Nat.le (R.get ts T.resLo + 36) (R.get ts T.resHi)));
+  check "the command bytes are the program's, in order" (isPrefix cmds (expectRgbCmds (List.length frames + 1)));
+  match Hdl.strEq name "oledrgb" with
+  | .true => check "the power-up got through the initialisation commands"
+      (Nat.le (List.length (RProg.cmdsOf RProg.init) - 1) (List.length cmds))
+  | .false => do
+    check "VCCEN on after RES, display on at least tVcc cycles after VCCEN"
+      (Bool.and (Nat.lt (R.get ts T.resHi) (R.get ts T.vbat)) (Nat.le (R.get ts T.vbat + c.tVcc) (R.get ts T.on)));
+    check "the SSD1331's registers as the demo wants them" (Q.wanted m.regs);
+    check ("all " <+> Hdl.show OledRgb.frames <+> " frames shown") (Nat.le OledRgb.frames (List.length frames));
+    checkRgbFrames c 1 frames
+
+def genRgb (d : Design) : EIO Unit := do
+  let name := d.name;
+  let c := OledRgb.cfgOf name;
+  let ins := OledRgb.input name;
+  let net := Design.netlist d;
+  say (name <+> ": " <+> Hdl.show (Netlist.size net) <+> " netlist nodes, "
+    <+> Hdl.show (List.length net.regs) <+> " registers, " <+> Hdl.show (List.length ins) <+> " cycles");
+  check "every port has its pin, every pin its port" (match Pcf.check net OledRgb.pins with
+    | .nil => .true
+    | _ => .false);
+  FS.writeFile (build (name <+> ".pcf")) (Pcf.emit net Oled.clk OledRgb.pins);
+  let ys := Design.runLeaves d ins;
+  checkRgbModel name c (QModel.ofRun ys);
+  check "netlist simulation = value simulation (all cycles)" (leavesEq (Netlist.simulate net ins) ys);
+  FS.writeFile (build (name <+> ".v")) (Verilog.emit net);
+  FS.writeFile (build (name <+> "_tb.v")) (Testbench.verilog net (build (name <+> ".vec")) (List.length ins));
+  FS.writeFile (build (name <+> ".vec")) "";
+  writeVec (build (name <+> ".vec")) (List.length ins) (Testbench.lines net ins ys)
+
+def genMono (d : Design) : EIO Unit := do
+  let name := d.name;
+  let c := Oled.cfgOf name;
+  let ins := Oled.input name;
+  let net := Design.netlist d;
+  say (name <+> ": " <+> Hdl.show (Netlist.size net) <+> " netlist nodes, "
+    <+> Hdl.show (List.length net.regs) <+> " registers, " <+> Hdl.show (List.length ins) <+> " cycles");
+  check "every port has its pin, every pin its port" (match Pcf.check net Oled.pins with
+    | .nil => .true
+    | _ => .false);
+  FS.writeFile (build (name <+> ".pcf")) (Pcf.emit net Oled.clk Oled.pins);
+  let ys := Design.runLeaves d ins;
+  checkModel name c (Model.ofRun ys);
+  check "netlist simulation = value simulation (all cycles)" (leavesEq (Netlist.simulate net ins) ys);
+  FS.writeFile (build (name <+> ".v")) (Verilog.emit net);
+  FS.writeFile (build (name <+> "_tb.v")) (Testbench.verilog net (build (name <+> ".vec")) (List.length ins));
+  FS.writeFile (build (name <+> ".vec")) "";
+  writeVec (build (name <+> ".vec")) (List.length ins) (Testbench.lines net ins ys)
+
+def genDesign (d : Design) : EIO Unit := match OledRgb.isRgb d.name with
+  | .true => genRgb d
+  | .false => genMono d
+
+def pickGo (names : List String) : List Design → List Design
+  | .nil => .nil
+  | .cons d ds => match Hdl.member d.name names with
+    | .true => .cons d (pickGo names ds)
+    | .false => pickGo names ds
+def allDesigns : List Design := List.append Oled.designs OledRgb.designs
+def pick (names : List String) : List Design := match names with
+  | .nil => allDesigns
+  | .cons _ _ => pickGo names allDesigns
+
+def pinsOf (name : String) : List Pin := match OledRgb.isRgb name with
+  | .true => OledRgb.pins
+  | .false => Oled.pins
+
+-- `quick NAME…`: the Verilog and the pin constraints only, no simulation
+def quickDesign (d : Design) : EIO Unit := do
+  let net := Design.netlist d;
+  check (d.name <+> ": every port has its pin, every pin its port") (match Pcf.check net (pinsOf d.name) with
+    | .nil => .true
+    | _ => .false);
+  FS.writeFile (build (d.name <+> ".pcf")) (Pcf.emit net Oled.clk (pinsOf d.name));
+  FS.writeFile (build (d.name <+> ".v")) (Verilog.emit net)
+
+def gen (names : List String) : EIO Unit := do
+  ensureDir "build";
+  ensureDir "build/frames";
+  EIO.forEach genDesign (pick names)
+
+------------------------------------------------------------------------------------
+-- The tools
+
+def replay (std label name : String) (sources : List String) : EIO Unit := do
+  tool "iverilog" (.cons std (.cons "-o" (.cons (build (name <+> label <+> ".vvp"))
+    (.cons (build (name <+> "_tb.v")) sources))));
+  out ← toolOutput "vvp" (.cons "-n" (.cons (build (name <+> label <+> ".vvp")) .nil));
+  say out;
+  check ("Verilog simulation" <+> label <+> " of " <+> name <+> " = value simulation")
+    (String.contains out ("PASS " <+> name))
+
+def simDesign (d : Design) : EIO Unit :=
+  replay "-g2005" "" d.name (.cons (build (Design.name d <+> ".v")) .nil)
+
+def bitDesign (d : Design) : EIO Unit := do
+  let name := Design.name d;
+  tool "yosys" (.cons "-q" (.cons "-l" (.cons (build (name <+> ".yosys.log")) (.cons "-p"
+    (.cons ("synth_ice40 -top " <+> name <+> " -json " <+> build (name <+> ".json")
+      <+> "; write_verilog -noattr " <+> build (name <+> "_syn.v"))
+    (.cons (build (name <+> ".v")) .nil))))));
+  tool "nextpnr-ice40" (.cons "--hx1k" (.cons "--package" (.cons "tq144" (.cons "--freq" (.cons "12"
+    (.cons "--json" (.cons (build (name <+> ".json")) (.cons "--pcf" (.cons (build (name <+> ".pcf"))
+    (.cons "--asc" (.cons (build (name <+> ".asc")) (.cons "--log" (.cons (build (name <+> ".nextpnr.log"))
+    (.cons "-q" .nil))))))))))))));
+  tool "icepack" (.cons (build (name <+> ".asc")) (.cons (build (name <+> ".bin")) .nil));
+  tool "icetime" (.cons "-d" (.cons "hx1k" (.cons "-P" (.cons "tq144" (.cons "-p" (.cons (build (name <+> ".pcf"))
+    (.cons "-c" (.cons "12" (.cons "-m" (.cons "-t" (.cons "-r" (.cons (build (name <+> ".icetime.rpt"))
+    (.cons (build (name <+> ".asc")) .nil)))))))))))))
+
+def Chars.trim : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match Nat.lt (Char.code c) 33 with
+    | .true => .nil
+    | .false => .cons c (Chars.trim cs)
+
+def postsimDesign (cells : String) (d : Design) : EIO Unit :=
+  replay "-g2012" "_syn" (Design.name d) (.cons (build (Design.name d <+> "_syn.v")) (.cons cells .nil))
+
+def postsim (names : List String) : EIO Unit := do
+  dat ← toolOutput "yosys-config" (.cons "--datdir" .nil);
+  EIO.forEach (postsimDesign (String.mk (Chars.trim (String.chars dat)) <+> "/ice40/cells_sim.v")) (pick names)
+
+------------------------------------------------------------------------------------
+-- `look ROWS T…`: the effects' pictures at frame counter values T, computed pixel by
+-- pixel without the circuit (quick, for trying effects), as build/look/ROWS_tT.pbm
+
+def Chars.toNat : List Char → Nat → Nat
+  | .nil, acc => acc
+  | .cons c cs, acc => Chars.toNat cs (acc * 10 + (Char.code c - 48))
+def String.toNat (s : String) : Nat := Chars.toNat (String.chars s) 0
+
+def lookAt (rows : Nat) (ts : String) : EIO Unit := do
+  let t := String.toNat ts;
+  let c := OledCfg.fast rows 0 1;
+  let f := Ref.frameAt c t;
+  FS.writeFile (build ("look/" <+> Hdl.show rows <+> "_t" <+> ts <+> ".pbm")) (Pbm.of rows (List.append f Ram.empty));
+  say ("t = " <+> ts)
+
+def lookRgb (ts : String) : EIO Unit := do
+  FS.writeFile (build ("look/rgb_t" <+> ts <+> ".ppm")) (Ppm.of (RRef.frame (String.toNat ts)));
+  say ("t = " <+> ts)
+
+def look : List String → EIO Unit
+  | .nil => EIO.fail "usage: oled look ROWS|rgb T…"
+  | .cons rows ts => do
+    ensureDir "build";
+    ensureDir "build/look";
+    match String.eq rows "rgb" with
+    | .true => EIO.forEach lookRgb ts
+    | .false => EIO.forEach (lookAt (String.toNat rows)) ts
+
+def usage : String :=
+  "usage: oled gen | sim | bit | postsim | all [NAME…] | flash NAME | look ROWS T…"
+
+def run : List String → EIO Unit
+  | .cons cmd rest => (match String.eq cmd "gen", String.eq cmd "sim", String.eq cmd "bit", String.eq cmd "postsim" with
+    | .true, _, _, _ => gen rest
+    | _, .true, _, _ => EIO.forEach simDesign (pick rest)
+    | _, _, .true, _ => EIO.forEach bitDesign (pick rest)
+    | _, _, _, .true => postsim rest
+    | _, _, _, _ => match String.eq cmd "all", String.eq cmd "flash", rest with
+      | .true, _, _ => EIO.bind (gen rest) (fun u => EIO.bind (EIO.forEach simDesign (pick rest))
+          (fun u => EIO.bind (EIO.forEach bitDesign (pick rest)) (fun u => postsim rest)))
+      | _, .true, .cons name _ => tool "iceprog" (.cons (build (name <+> ".bin")) .nil)
+      | _, _, _ => match String.eq cmd "look", String.eq cmd "quick" with
+        | .true, _ => look rest
+        | _, .true => EIO.bind (ensureDir "build") (fun u => EIO.forEach quickDesign (pick rest))
+        | _, _ => EIO.fail usage)
+  | .nil => EIO.fail usage
+
+def main : IO Unit := EIO.toIO (EIO.bind (EIO.lift IO.args) run)

@@ -1,0 +1,369 @@
+import Icestick.Uart
+import Text
+import Icestick.Wave
+-- An SSD1306 OLED controller (128 × 64 or 128 × 32, monochrome) on the iCEstick's Pmod
+-- connector, over 4-wire SPI with D/C, RES and the two supply switches of a Digilent
+-- PmodOLED (VBATC, VDDC; low switches the supply on, on modules without them the pins
+-- are simply not connected).
+--
+-- Three parts, each a step function polymorphic in the representation like the UART:
+--
+--  * the SPI byte serialiser (`spiStep`): 16 clock cycles a byte, SCLK = 12 MHz / 2 =
+--    6 MHz, mode 0 (the SSD1306 samples SDIN on the rising edge of SCLK), most
+--    significant bit first;
+--  * the program (`Prog`): the power-up sequence and the frame loop as a list of steps
+--    (switch a supply, pulse RES, wait, send a command, stream a frame), written with
+--    the datasheet's command names (`Ssd`) and compiled to a read-only memory of 9-bit
+--    entries that the controller walks;
+--  * the controller (`ctlStep`): runs the program, and while it streams a frame asks the
+--    caller for one pixel per cycle (`Gen`: the byte index and the row in the page) and
+--    packs eight of them into the next byte while the serialiser sends the last one.
+--
+-- The SSD1306 in horizontal addressing mode takes a frame as 128 × (rows / 8) bytes: page
+-- 0 (rows 0 … 7) from column 0 to 127, then page 1, …; bit 0 of a byte is the top row of
+-- its page. Each frame starts with CS high for a while (so that a lost bit cannot shift
+-- every later byte) and the column and page ranges sent again.
+
+def D2 : HwTy := HwTy.bits 2
+def D3 : HwTy := HwTy.bits 3
+def D4 : HwTy := HwTy.bits 4
+def D5 : HwTy := HwTy.bits 5
+def D6 : HwTy := HwTy.bits 6
+def D7 : HwTy := HwTy.bits 7
+def D8 : HwTy := HwTy.bits 8
+def D9 : HwTy := HwTy.bits 9
+def D10 : HwTy := HwTy.bits 10
+def D11 : HwTy := HwTy.bits 11
+def D21 : HwTy := HwTy.bits 21
+
+------------------------------------------------------------------------------------
+-- Configuration (meta-level numbers: only constants in the netlist depend on them).
+
+structure OledCfg where
+  tVdd : Nat      -- cycles after VDD comes on, and the length of the RES pulse
+  tVbat : Nat     -- cycles after VBAT comes on before the display is switched on
+  frameLog : Nat  -- a frame starts every 2^frameLog cycles
+  rows : Nat      -- 64 or 32
+  t0 : Nat        -- the frame counter's first value
+  tStep : Nat     -- added to it every frame
+
+-- The board: 1 ms (12000 cycles; the RES pulse must be at least 3 µs), 100 ms after
+-- VBAT (PmodOLED reference manual, power-on sequence), a frame every 2^17 cycles
+-- (91.6 frames per second).
+def OledCfg.board : OledCfg := OledCfg.mk 12000 1200000 17 64 0 1
+-- the same for a 128 × 32 panel (the Digilent PmodOLED's)
+def OledCfg.board32 : OledCfg := OledCfg.mk 12000 1200000 17 32 0 1
+-- For simulations: short waits (the RES pulse still above 3 µs), a frame every 2^15
+-- cycles (2^14 on 32 rows); `t0` and `tStep` pick the frames to look at.
+def OledCfg.fast (rows t0 tStep : Nat) : OledCfg :=
+  OledCfg.mk 40 200 (match Nat.beq rows 64 with
+    | .true => 15
+    | .false => 14) rows t0 tStep
+
+def OledCfg.pages (c : OledCfg) : Nat := Nat.div c.rows 8
+-- the number of data bytes in a frame, and the index of the last one
+def OledCfg.bytes (c : OledCfg) : Nat := 128 * OledCfg.pages c
+
+------------------------------------------------------------------------------------
+-- The SSD1306's commands, as the datasheet (Solomon Systech SSD1306 rev. 1.1, section 9,
+-- "Command table") names them, and their bytes.
+
+inductive Ssd where
+  | displayOff                      -- AE
+  | displayOn                       -- AF
+  | clockDiv (d : Nat)              -- D5 d   (divide ratio and oscillator frequency)
+  | multiplex (m : Nat)             -- A8 m   (m + 1 rows, 15 … 63)
+  | offset (o : Nat)                -- D3 o   (vertical shift of the COM lines)
+  | startLine (l : Nat)             -- 40 + l (0 … 63)
+  | chargePump (on : Bool)          -- 8D 14 / 8D 10
+  | addrMode (m : Nat)              -- 20 m   (0 horizontal, 1 vertical, 2 page)
+  | segRemap (on : Bool)            -- A1 / A0 (column 127 on SEG0)
+  | comReverse (on : Bool)          -- C8 / C0 (scan from COM[N-1] to COM0)
+  | comPins (alt : Bool)            -- DA 12 / DA 02 (alternative COM pin configuration)
+  | contrast (c : Nat)              -- 81 c
+  | precharge (p1 p2 : Nat)         -- D9 (p2 · 16 + p1), the two phases in clocks
+  | vcomh (v : Nat)                 -- DB v
+  | resume                          -- A4 (the display follows the RAM)
+  | normal                          -- A6 (not inverted)
+  | columns (a b : Nat)             -- 21 a b (horizontal/vertical mode: column range)
+  | pages (a b : Nat)               -- 22 a b (page range)
+
+def Ssd.flag (b : Bool) (yes no : Nat) : Nat := match b with
+  | .true => yes
+  | .false => no
+
+def Ssd.bytes : Ssd → List Nat
+  | .displayOff => .cons 174 .nil
+  | .displayOn => .cons 175 .nil
+  | .clockDiv d => .cons 213 (.cons d .nil)
+  | .multiplex m => .cons 168 (.cons m .nil)
+  | .offset o => .cons 211 (.cons o .nil)
+  | .startLine l => .cons (64 + l) .nil
+  | .chargePump on => .cons 141 (.cons (Ssd.flag on 20 16) .nil)
+  | .addrMode m => .cons 32 (.cons m .nil)
+  | .segRemap on => .cons (Ssd.flag on 161 160) .nil
+  | .comReverse on => .cons (Ssd.flag on 200 192) .nil
+  | .comPins alt => .cons 218 (.cons (Ssd.flag alt 18 2) .nil)
+  | .contrast c => .cons 129 (.cons c .nil)
+  | .precharge p1 p2 => .cons 217 (.cons (p2 * 16 + p1) .nil)
+  | .vcomh v => .cons 219 (.cons v .nil)
+  | .resume => .cons 164 .nil
+  | .normal => .cons 166 .nil
+  | .columns a b => .cons 33 (.cons a (.cons b .nil))
+  | .pages a b => .cons 34 (.cons a (.cons b .nil))
+
+------------------------------------------------------------------------------------
+-- The program: what the controller does, in order.
+
+inductive Step where
+  | vddOn                 -- VDDC low: the logic supply on
+  | resLow                -- RES low: the SSD1306 in reset
+  | resHigh
+  | vbatOn                -- VBATC low: the panel supply on
+  | waitShort             -- `tVdd` cycles
+  | waitLong              -- `tVbat` cycles
+  | send (c : Ssd)        -- a command (D/C low)
+  | blank                 -- a frame of zeros (D/C high)
+  | frame                 -- CS high until the next frame tick, then CS low
+  | pixels                -- a frame of the demo
+  | again                 -- continue at `frame`
+
+def Step.code : Step → Nat
+  | .vddOn => 0
+  | .resLow => 1
+  | .resHigh => 2
+  | .vbatOn => 3
+  | .waitShort => 4
+  | .waitLong => 5
+  | .send _ => 15
+  | .blank => 6
+  | .frame => 7
+  | .pixels => 8
+  | .again => 9
+
+def Prog.list (xs ys : List Step) : List Step := List.append xs ys
+def Prog.sends : List Ssd → List Step → List Step
+  | .nil, rest => rest
+  | .cons c cs, rest => .cons (Step.send c) (Prog.sends cs rest)
+
+-- the column and page ranges: the whole panel
+def Prog.window (c : OledCfg) (rest : List Step) : List Step :=
+  .cons (Step.send (Ssd.columns 0 127)) (.cons (Step.send (Ssd.pages 0 (OledCfg.pages c - 1))) rest)
+
+-- The power-on sequence of the PmodOLED reference manual (Digilent, 2011): VDD on;
+-- display off; initialise; clear the screen; VBAT on; 100 ms; display on. The reset
+-- pulse and the commands are those of Digilent's driver and the SSD1306 application
+-- note (datasheet, "Application example", software initialisation flow), for 128 × 64 or
+-- 128 × 32: the charge pump on (no external VCC), horizontal addressing, column 127 at
+-- SEG0 and COM scanned backwards (the picture upright with the pins at the top, as on
+-- most modules), the COM pin configuration for the panel height.
+def Prog.init (c : OledCfg) : List Step :=
+  Prog.list (.cons Step.vddOn (.cons Step.waitShort (.cons (Step.send Ssd.displayOff)
+    (.cons Step.resLow (.cons Step.waitShort (.cons Step.resHigh (.cons Step.waitShort .nil)))))))
+  (Prog.sends (.cons (Ssd.clockDiv 128) (.cons (Ssd.multiplex (c.rows - 1)) (.cons (Ssd.offset 0)
+    (.cons (Ssd.startLine 0) (.cons (Ssd.chargePump .true) (.cons (Ssd.addrMode 0)
+    (.cons (Ssd.segRemap .true) (.cons (Ssd.comReverse .true) (.cons (Ssd.comPins (Nat.beq c.rows 64))
+    (.cons (Ssd.contrast 207) (.cons (Ssd.precharge 1 15) (.cons (Ssd.vcomh 64)
+    (.cons Ssd.resume (.cons Ssd.normal .nil))))))))))))))
+  (Prog.window c (.cons Step.blank
+    (.cons Step.vbatOn (.cons Step.waitLong (.cons (Step.send Ssd.displayOn) .nil))))))
+
+-- the frame loop
+def Prog.loop (c : OledCfg) : List Step :=
+  .cons Step.frame (Prog.window c (.cons Step.pixels (.cons Step.again .nil)))
+
+def Prog.steps (c : OledCfg) : List Step := List.append (Prog.init c) (Prog.loop c)
+
+-- The memory: one 9-bit entry per command byte (bit 8 low) or per other step (bit 8
+-- high, the step's code below).
+def Prog.entries : List Step → List Nat
+  | .nil => .nil
+  | .cons s ss => match s with
+    | .send c => List.append (Ssd.bytes c) (Prog.entries ss)
+    | _ => .cons (256 + Step.code s) (Prog.entries ss)
+
+def Prog.rom (c : OledCfg) : List Nat := Prog.entries (Prog.steps c)
+-- where `again` continues
+def Prog.frameAt (c : OledCfg) : Nat := List.length (Prog.entries (Prog.init c))
+
+-- the command bytes alone, in order (what the SSD1306 is sent with D/C low)
+def Prog.cmdsOf : List Step → List Nat
+  | .nil => .nil
+  | .cons s ss => match s with
+    | .send c => List.append (Ssd.bytes c) (Prog.cmdsOf ss)
+    | _ => Prog.cmdsOf ss
+
+------------------------------------------------------------------------------------
+-- A read-only memory as a balanced tree of multiplexers on the address bits (yosys makes
+-- small look-up tables of it; a chain of comparisons would be a carry chain each,
+-- FINDINGS.md G16). A subtree whose entries are all equal is a constant. Missing entries
+-- are 0.
+
+def Rom.allEq (v : Nat) : List Nat → Bool
+  | .nil => .true
+  | .cons x xs => Bool.and (Nat.beq x v) (Rom.allEq v xs)
+
+-- The tree is built once, at the meta level (`RomT`), and turned into multiplexers
+-- (`Rom.at`) wherever the memory is read: the value simulation runs that for every cycle,
+-- so the tree must not be rebuilt each time (FINDINGS.md, G17).
+inductive RomT where
+  | leaf (v : Nat)
+  | node (k : Nat) (hi lo : RomT)   -- address bit k: 1 → hi, 0 → lo
+
+def RomT.go : Nat → List Nat → RomT
+  | .zero, es => RomT.leaf (Hdl.nthD 0 es 0)
+  | .succ k, es => match Rom.allEq (Hdl.nthD 0 es 0) (List.take (Nat.pow 2 (Nat.succ k)) es) with
+    | .true => RomT.leaf (Hdl.nthD 0 es 0)
+    | .false => RomT.node k (RomT.go k (List.drop (Nat.pow 2 k) es)) (RomT.go k (List.take (Nat.pow 2 k) es))
+
+-- `2^k` entries: the list, then zeros
+def RomT.build (k : Nat) (es : List Nat) : RomT := RomT.go k (List.append es (Wave.rep (Nat.pow 2 k) 0 .nil))
+
+def Rom.at {r : HwTy → Type} [Hw r] (w : Nat) {ω n : Nat} (a : r (HwTy.bits n)) : RomT → r (HwTy.bits w)
+  | .leaf v => Hw.lit w v
+  | .node k hi lo => Hw.mux (Hw.slice k 1 a) (Rom.at w a hi) (Rom.at w a lo)
+
+-- the entry at address `a` of a memory of `2^k` entries
+def Rom.tree {r : HwTy → Type} [Hw r] (w : Nat) {ω n : Nat} (a : r (HwTy.bits n)) (k : Nat) (es : List Nat) : r (HwTy.bits w) :=
+  Rom.at w a (RomT.build k es)
+
+-- bit `i` of `x`, `i` a signal
+def pickBit {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) {ω m : Nat} (i : r (HwTy.bits m)) : Nat → Nat → r Bit
+  | .zero, lo => Hw.slice lo 1 x
+  | .succ k, lo => Hw.mux (Hw.slice k 1 i) (pickBit x i k (lo + Nat.pow 2 k)) (pickBit x i k lo)
+
+def zext {r : HwTy → Type} [Hw r] {ω n : Nat} (m : Nat) (x : r (HwTy.bits n)) : r (HwTy.bits (Nat.add m n)) :=
+  Hw.cat (Hw.lit m 0) x
+
+------------------------------------------------------------------------------------
+-- The SPI serialiser. State: SCLK and SDIN (registers, so the pins cannot glitch), the
+-- seven bits still to send and the number of half bit periods left (0: idle).
+--
+-- `load` with `d` is taken when idle. The 16 cycles that follow show (SCLK, SDIN) =
+-- (0, d7), (1, d7), (0, d6), (1, d6), … (0, d0), (1, d0); in the last of them the
+-- serialiser is idle again, so bytes can follow back to back. SCLK stays high when
+-- idle; the SSD1306 only looks at its rising edges while CS is low.
+-- (`Icestick.Proofs.Oled`: for every byte, the bits sampled at the rising edges are the
+-- byte's, most significant first, and the serialiser is idle after 16 cycles.)
+
+structure Spi (r : HwTy → Type) where
+  sclk : r Bit
+  mosi : r Bit
+  sh : r D7
+  cnt : r D4
+  deriving Bundle
+
+def Spi.init : Spi HwTy.El := Spi.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 7 0) (BitVec.ofNat 4 0)
+
+def spiReady {r : HwTy → Type} [Hw r] (s : Spi r) : r Bit := eqLit s.cnt 0
+
+def spiStep {r : HwTy → Type} [Hw r] (s : Spi r) (load : r Bit) (d : r D8) : r Spi.code :=
+  let busy := bnot (spiReady s);
+  let go := band (spiReady s) load;
+  let fall := band busy s.sclk;
+  Spi.pack (Spi.mk
+    (Hw.mux go lo (Hw.mux busy (bnot s.sclk) s.sclk))
+    (Hw.mux go (Hw.slice 7 1 d) (Hw.mux fall (Hw.slice 6 1 s.sh) s.mosi))
+    (Hw.mux go (Hw.slice 0 7 d) (Hw.mux fall (Hw.cat (Hw.slice 0 6 s.sh) lo) s.sh))
+    (Hw.mux go (Hw.lit 4 15) (Hw.mux busy (dec s.cnt) s.cnt)))
+
+------------------------------------------------------------------------------------
+-- The controller.
+--
+-- The pixel generator: the byte being assembled (`idx`: page on top of column), the row
+-- in the page of the next pixel (`k`, 7 down to 0: the first bit sent is bit 7, the
+-- bottom row of the page) and the bits so far. Eight cycles a byte, then it waits
+-- (`full`) until the serialiser takes it.
+
+structure Gen (r : HwTy → Type) where
+  idx : r D10
+  k : r D3
+  nb : r D8
+  full : r Bit
+  deriving Bundle
+
+def Gen.init : Gen HwTy.El := Gen.mk (BitVec.ofNat 10 0) (BitVec.ofNat 3 7) (BitVec.ofNat 8 0) (BitVec.ofNat 1 0)
+
+-- the pixel the generator wants now: x = column, y = 8 · page + k
+def Gen.x {r : HwTy → Type} [Hw r] (g : Gen r) : r D7 := Hw.slice 0 7 g.idx
+def Gen.y {r : HwTy → Type} [Hw r] (g : Gen r) : r D6 := Hw.cat (Hw.slice 7 3 g.idx) g.k
+
+-- State: the program counter, the wait (armed, cycles left), the pins (as levels:
+-- VDDC, RES, VBATC, CS, D/C; CS goes low with VDD, and high between frames),
+-- the serialiser, the generator, the frame timer, a frame
+-- tick not yet taken, and the frame counter.
+structure Ctl (fl : Nat) (r : HwTy → Type) where
+  pc : r D6
+  armed : r Bit
+  wait : r D21
+  vdd : r Bit
+  res : r Bit
+  vbat : r Bit
+  cs : r Bit
+  dc : r Bit
+  spi : Spi r
+  gen : Gen r
+  timer : r (HwTy.bits fl)
+  pend : r Bit
+  t : r D11
+  deriving Bundle
+
+def Ctl.init (c : OledCfg) : Ctl c.frameLog HwTy.El :=
+  Ctl.mk (BitVec.ofNat 6 0) (BitVec.ofNat 1 0) (BitVec.ofNat 21 0)
+    (BitVec.ofNat 1 1) (BitVec.ofNat 1 1) (BitVec.ofNat 1 1) (BitVec.ofNat 1 1) (BitVec.ofNat 1 0)
+    Spi.init Gen.init (BitVec.ofNat c.frameLog 0) (BitVec.ofNat 1 0) (BitVec.ofNat 11 c.t0)
+
+-- the display is on (the program is in its frame loop)
+def ctlShowing {r : HwTy → Type} [Hw r] (c : OledCfg) {ω fl : Nat} (s : Ctl fl r) : r Bit :=
+  bnot (Hw.ult s.pc (Hw.lit 6 (Prog.frameAt c)))
+
+-- one cycle (`rom`: `Prog.tree c`); `pix` is the pixel at (Gen.x s.gen, Gen.y s.gen) for frame `s.t`
+-- the program's memory (built once: `Prog.tree c`)
+def Prog.tree (c : OledCfg) : RomT := RomT.build 6 (Prog.rom c)
+
+def ctlStep {r : HwTy → Type} [Hw r] (c : OledCfg) (rom : RomT) (s : Ctl c.frameLog r) (pix : r Bit) : r (Ctl.code c.frameLog) :=
+  let e := Rom.at 9 s.pc rom;
+  let isCmd := bnot (Hw.slice 8 1 e);
+  let code := Hw.slice 0 4 e;
+  let ready := spiReady s.spi;
+  let isOp := fun (k : Nat) => band (Hw.slice 8 1 e) (eqLit code k);
+  let opVdd := isOp 0;
+  let opResLo := isOp 1;
+  let opResHi := isOp 2;
+  let opVbat := isOp 3;
+  let opWait := bor (isOp 4) (isOp 5);
+  let opBlank := isOp 6;
+  let opFrame := isOp 7;
+  let opPix := isOp 8;
+  let opAgain := isOp 9;
+  let isData := bor opBlank opPix;
+  let g := s.gen;
+  let lastByte := eqLit g.idx (OledCfg.bytes c - 1);
+  let loadData := band isData (band g.full ready);
+  let loadCmd := band isCmd ready;
+  let waitDone := band s.armed (eqLit s.wait 0);
+  let frameGo := band opFrame (band s.cs s.pend);
+  let adv := band ready (bor isCmd (bor opVdd (bor opResLo (bor opResHi (bor opVbat
+    (bor (band opWait waitDone) (bor frameGo (band loadData lastByte))))))));
+  let tick := eqLit s.timer (Nat.pow 2 c.frameLog - 1);
+  let genOn := band isData (bnot g.full);
+  let bit := band pix opPix;
+  Ctl.pack c.frameLog (Ctl.mk
+    (Hw.mux (band ready opAgain) (Hw.lit 6 (Prog.frameAt c)) (Hw.mux adv (inc s.pc) s.pc))
+    (band opWait (band ready (bnot waitDone)))
+    (Hw.mux (band opWait (bnot s.armed)) (Hw.mux (isOp 5) (Hw.lit 21 c.tVbat) (Hw.lit 21 c.tVdd))
+      (Hw.mux (eqLit s.wait 0) s.wait (dec s.wait)))
+    (Hw.mux (band ready opVdd) lo s.vdd)
+    (Hw.mux (band ready opResLo) lo (Hw.mux (band ready opResHi) hi s.res))
+    (Hw.mux (band ready opVbat) lo s.vbat)
+    (Hw.mux (band ready opFrame) (bnot (band s.pend s.cs)) (Hw.mux (band ready opVdd) lo s.cs))
+    (Hw.mux loadCmd lo (Hw.mux loadData hi s.dc))
+    (Spi.unpack (spiStep s.spi (bor loadCmd loadData) (Hw.mux isCmd (Hw.slice 0 8 e) g.nb)))
+    (Gen.mk
+      (Hw.mux loadData (Hw.mux lastByte (Hw.lit 10 0) (inc g.idx)) g.idx)
+      (Hw.mux genOn (dec g.k) g.k)
+      (Hw.mux genOn (Hw.cat (Hw.slice 0 7 g.nb) bit) g.nb)
+      (Hw.mux (band genOn (eqLit g.k 0)) hi (Hw.mux loadData lo g.full)))
+    (inc s.timer)
+    (Hw.mux tick hi (Hw.mux frameGo lo s.pend))
+    (Hw.mux tick (Hw.add s.t (Hw.lit 11 c.tStep)) s.t))

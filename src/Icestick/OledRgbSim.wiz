@@ -1,0 +1,263 @@
+import Icestick.DemoRgb
+import Icestick.OledSim
+-- The colour demo in simulation: pins and designs.
+
+-- Pmod J2 as the PmodOLEDrgb's J1 (reference manual, table 1): 1 CS, 2 MOSI, 3 NC,
+-- 4 SCK, 7 D/C, 8 RES, 9 VCCEN, 10 PMODEN.
+def OledRgb.pins : List Pin :=
+  .cons (Pin.one "uart_rx" 9) (.cons (Pin.one "uart_tx" 8)
+  (.cons (Pin.bus "leds" (.cons 99 (.cons 98 (.cons 97 (.cons 96 (.cons 95 .nil))))))
+  (.cons (Pin.one "oled_cs" 78)      -- J2 pin 1
+  (.cons (Pin.one "oled_mosi" 79)    -- J2 pin 2
+  (.cons (Pin.one "oled_sclk" 81)    -- J2 pin 4
+  (.cons (Pin.one "oled_dc" 87)      -- J2 pin 7
+  (.cons (Pin.one "oled_res" 88)     -- J2 pin 8
+  (.cons (Pin.one "oled_vccen" 90)   -- J2 pin 9
+  (.cons (Pin.one "oled_pmoden" 91)  -- J2 pin 10
+  .nil)))))))))
+
+-- `oledrgb` for the board; `oledrgb_fast` with short waits and frames back to back,
+-- the frame counter stepping by 539 (frames 1 … 4: every effect, two of them wiping in)
+def OledRgb.fast : RgbCfg := RgbCfg.fast 0 539
+
+def OledRgb.designs : List Design :=
+  .cons (Circuit.design "oledrgb" (demoRgb RgbCfg.board Oled.bit))
+  (.cons (Circuit.design "oledrgb_fast" (demoRgb OledRgb.fast Oled.bit)) .nil)
+
+def OledRgb.isRgb (name : String) : Bool := String.startsWith name "oledrgb"
+def OledRgb.cfgOf (name : String) : RgbCfg := match Hdl.strEq name "oledrgb" with
+  | .true => RgbCfg.board
+  | .false => OledRgb.fast
+
+------------------------------------------------------------------------------------
+-- The SSD1331, from its pins (the same serial interface as the SSD1306: `SEv.ofRun`; the
+-- pins at indices 7 and 8 are VCCEN and PMODEN here, high: on). Its registers, by index:
+
+def Q.on : Nat := 0
+def Q.remap : Nat := 1
+def Q.start : Nat := 2
+def Q.offset : Nat := 3
+def Q.mode : Nat := 4        -- A4 … A7: 0 normal, 1 all on, 2 all off, 3 inverse
+def Q.mux : Nat := 5
+def Q.master : Nat := 6
+def Q.powerSave : Nat := 7
+def Q.phase : Nat := 8
+def Q.clock : Nat := 9
+def Q.prechA : Nat := 10
+def Q.prechB : Nat := 11
+def Q.prechC : Nat := 12
+def Q.prechLevel : Nat := 13
+def Q.vcomh : Nat := 14
+def Q.current : Nat := 15
+def Q.contrastA : Nat := 16
+def Q.contrastB : Nat := 17
+def Q.contrastC : Nat := 18
+def Q.lock : Nat := 19       -- the byte after FD (12: unlocked, 16: locked)
+def Q.scroll : Nat := 20     -- 2F: 1, 2E: 0
+def Q.c0 : Nat := 21
+def Q.c1 : Nat := 22
+def Q.r0 : Nat := 23
+def Q.r1 : Nat := 24
+
+-- after reset (datasheet, command table, the reset values)
+def Q.reset : List Nat :=
+  .cons 0 (.cons 64 (.cons 0 (.cons 0 (.cons 0 (.cons 63 (.cons 143 (.cons 26 (.cons 116 (.cons 208
+  (.cons 128 (.cons 128 (.cons 128 (.cons 62 (.cons 62 (.cons 15 (.cons 128 (.cons 128 (.cons 128
+  (.cons 18 (.cons 0 (.cons 0 (.cons 95 (.cons 0 (.cons 63 .nil))))))))))))))))))))))))
+
+def Q.isAny (b : Nat) : List Nat → Bool
+  | .nil => .false
+  | .cons x xs => Bool.or (Nat.beq b x) (Q.isAny b xs)
+
+-- argument bytes per command (SSD1331 command table; every byte, arguments too, with
+-- D/C low): 15 and 75 two; 81 … 83, 87, 8A … 8C, A0 … A2, A8, AD, B0, B1, B3, BB, BE,
+-- FD, 23, 26 one; AB and 27 five; 25 four; 21 and 24 seven; 22 ten; B8 32; the rest none
+def Q.argCount (b : Nat) : Nat :=
+  match Q.isAny b (.cons 21 (.cons 117 .nil)), Q.isAny b (.cons 171 (.cons 39 .nil)), Nat.beq b 37 with
+  | .true, _, _ => 2
+  | _, .true, _ => 5
+  | _, _, .true => 4
+  | _, _, _ => match Q.isAny b (.cons 33 (.cons 36 .nil)), Nat.beq b 34, Nat.beq b 184 with
+    | .true, _, _ => 7
+    | _, .true, _ => 10
+    | _, _, .true => 32
+    | _, _, _ => match Q.isAny b (.cons 129 (.cons 130 (.cons 131 (.cons 135 (.cons 138 (.cons 139 (.cons 140
+        (.cons 160 (.cons 161 (.cons 162 (.cons 168 (.cons 173 (.cons 176 (.cons 177 (.cons 179 (.cons 187
+        (.cons 190 (.cons 253 (.cons 35 (.cons 38 .nil)))))))))))))))))))) with
+      | .true => 1
+      | .false => 0
+
+def Q.lookup (b : Nat) : List (Nat × Nat) → Nat
+  | .nil => 99
+  | .cons p ps => match Nat.beq p.1 b with
+    | .true => p.2
+    | .false => Q.lookup b ps
+
+-- the register a one-argument command sets (others: none, 99)
+def Q.argReg (b : Nat) : Nat :=
+  let pairs : List (Nat × Nat) := .cons (129, Q.contrastA) (.cons (130, Q.contrastB) (.cons (131, Q.contrastC)
+    (.cons (135, Q.current) (.cons (138, Q.prechA) (.cons (139, Q.prechB) (.cons (140, Q.prechC)
+    (.cons (160, Q.remap) (.cons (161, Q.start) (.cons (162, Q.offset) (.cons (168, Q.mux) (.cons (173, Q.master)
+    (.cons (176, Q.powerSave) (.cons (177, Q.phase) (.cons (179, Q.clock) (.cons (187, Q.prechLevel)
+    (.cons (190, Q.vcomh) (.cons (253, Q.lock) .nil)))))))))))))))));
+  Q.lookup b pairs
+
+-- one command with its arguments (while locked, only FD is taken)
+def Q.cmd (s : List Nat) (b : Nat) (args : List Nat) : List Nat :=
+  let a := Hdl.nthD 0 args 0;
+  let a2 := Hdl.nthD 0 args 1;
+  match Bool.and (R.is s Q.lock 22) (Bool.not (Nat.beq b 253)) with
+  | .true => s
+  | .false => match Nat.beq b 21, Nat.beq b 117, Nat.beq (Q.argCount b) 1 with
+    | .true, _, _ => R.set (R.set s Q.c0 a) Q.c1 a2
+    | _, .true, _ => R.set (R.set s Q.r0 a) Q.r1 a2
+    | _, _, .true => (match Nat.beq (Q.argReg b) 99 with
+      | .true => s
+      | .false => R.set s (Q.argReg b) a)
+    | _, _, _ => match Nat.beq b 174, Nat.beq b 175, Bool.and (Nat.le 164 b) (Nat.le b 167) with
+      | .true, _, _ => R.set s Q.on 0
+      | _, .true, _ => R.set s Q.on 1
+      | _, _, .true => R.set s Q.mode (b - 164)
+      | _, _, _ => match Nat.beq b 46, Nat.beq b 47 with
+        | .true, _ => R.set s Q.scroll 0
+        | _, .true => R.set s Q.scroll 1
+        | _, _ => s
+
+def Q.run : Nat → List Nat → List Nat → List Nat × List Nat
+  | .zero, s, bs => (s, bs)
+  | .succ fuel, s, bs => match bs with
+    | .nil => (s, .nil)
+    | .cons b rest => match Nat.le (Q.argCount b) (List.length rest) with
+      | .true => Q.run fuel (Q.cmd s b (List.take (Q.argCount b) rest)) (List.drop (Q.argCount b) rest)
+      | .false => (s, bs)
+
+def Q.ofCmds (bs : List Nat) : List Nat := (Q.run (List.length bs) Q.reset bs).1
+
+-- what the demo wants: on, unlocked, 65k colours with A0 72, 64 rows, external VCC,
+-- normal display, no scrolling, the whole panel as the window
+def Q.wanted (s : List Nat) : Bool :=
+  List.all (fun (kv : Nat × Nat) => R.is s kv.1 kv.2)
+    (.cons (Q.on, 1) (.cons (Q.lock, 18) (.cons (Q.remap, 114) (.cons (Q.start, 0) (.cons (Q.offset, 0)
+    (.cons (Q.mode, 0) (.cons (Q.mux, 63) (.cons (Q.master, 142) (.cons (Q.scroll, 0)
+    (.cons (Q.c0, 0) (.cons (Q.c1, 95) (.cons (Q.r0, 0) (.cons (Q.r1, 63) .nil)))))))))))))
+
+------------------------------------------------------------------------------------
+-- The model: commands, and frames. A frame is a run of data bytes (ended by CS high or a
+-- command) while the display is on; pixels are byte pairs, high byte first. The window
+-- must be the whole panel when a frame starts (`QFrame.full`); then pixel k is at
+-- (k mod 96, k / 96) (horizontal address increment, A0 bit 0 clear).
+
+structure QFrame where
+  cycle : Nat
+  bytes : Nat
+  full : Bool
+  pixels : List Nat   -- newest first while collecting
+
+structure QModel where
+  regs : List Nat
+  pending : List Nat
+  cmds : List Nat       -- newest first
+  data : List Nat       -- data bytes of the current run, newest first
+  ndata : Nat
+  first : Nat
+  frames : List QFrame  -- newest first
+  times : List Nat      -- T.vdd, T.resLo, T.resHi, T.vbat (VCCEN), T.first, T.on
+  nbytes : Nat
+
+def QModel.init : QModel := QModel.mk Q.reset .nil .nil .nil 0 0 .nil (Wave.rep 6 0 .nil) 0
+
+-- byte pairs, oldest first, from the bytes newest first
+def Q.pairsGo : List Nat → Nat → Bool → List Nat → List Nat
+  | .nil, lo, have, acc => acc
+  | .cons b rest, lo, have, acc => match have with
+    | .false => Q.pairsGo rest b .true acc
+    | .true => Q.pairsGo rest 0 .false (.cons (b * 256 + lo) acc)
+def Q.pairs (bs acc : List Nat) : List Nat := Q.pairsGo bs 0 .false acc
+
+def Q.whole (s : List Nat) : Bool :=
+  Bool.and (Bool.and (R.is s Q.c0 0) (R.is s Q.c1 95)) (Bool.and (R.is s Q.r0 0) (R.is s Q.r1 63))
+
+def QModel.flush (m : QModel) : QModel := match Bool.and (R.is m.regs Q.on 1) (Bool.not (Nat.beq m.ndata 0)) with
+  | .true => QModel.mk m.regs m.pending m.cmds .nil 0 m.first
+      (.cons (QFrame.mk m.first m.ndata (Q.whole m.regs) (Q.pairs m.data .nil)) m.frames) m.times m.nbytes
+  | .false => QModel.mk m.regs m.pending m.cmds .nil 0 m.first m.frames m.times m.nbytes
+
+def QModel.byte (m0 : QModel) (c dc b : Nat) : QModel :=
+  let m := match Nat.beq dc 0 with
+    | .true => QModel.flush m0
+    | .false => m0;
+  let times := match Nat.beq m.nbytes 0 with
+    | .true => R.set m.times T.first c
+    | .false => m.times;
+  match Nat.beq dc 0 with
+  | .true =>
+    let p := List.append m.pending (.cons b .nil);
+    let r := Q.run (List.length p) m.regs p;
+    let times2 := match Bool.and (R.is m.regs Q.on 0) (R.is r.1 Q.on 1) with
+      | .true => (match R.get times T.on with
+        | .zero => R.set times T.on c
+        | _ => times)
+      | .false => times;
+    QModel.mk r.1 r.2 (.cons b m.cmds) m.data m.ndata m.first m.frames times2 (m.nbytes + 1)
+  | .false => QModel.mk m.regs m.pending m.cmds (.cons b m.data) (m.ndata + 1)
+      (match Nat.beq m.ndata 0 with
+        | .true => c
+        | .false => m.first) m.frames times (m.nbytes + 1)
+
+def QModel.setTime (m : QModel) (k c : Nat) : QModel :=
+  QModel.mk m.regs m.pending m.cmds m.data m.ndata m.first m.frames (R.set m.times k c) m.nbytes
+
+-- RES low resets the registers; VCCEN (k = 1) and PMODEN (k = 2) come on when high
+def QModel.pin (m : QModel) (c k v : Nat) : QModel := match Nat.beq k 0, Nat.beq v 0 with
+  | .true, .true => QModel.mk Q.reset .nil m.cmds m.data m.ndata m.first m.frames (R.set m.times T.resLo c) m.nbytes
+  | .true, .false => QModel.setTime m T.resHi c
+  | .false, .false => (match Nat.beq k 1 with
+    | .true => QModel.setTime m T.vbat c
+    | .false => QModel.setTime m T.vdd c)
+  | .false, .true => m
+
+def QModel.go : QModel → List SEv → QModel
+  | m, .nil => QModel.flush m
+  | m, .cons e es => match e with
+    | .byte c dc b => QModel.go (QModel.byte m c dc b) es
+    | .csHigh c => QModel.go (QModel.flush m) es
+    | .pin c k v => QModel.go (QModel.pin m c k v) es
+
+def QModel.ofRun (ys : List (List Nat)) : QModel := QModel.go QModel.init (SEv.ofRun ys)
+
+------------------------------------------------------------------------------------
+-- What frame k (1, 2, …) must be: the effect at t = t0 + k · tStep, pixel by pixel.
+
+def RRef.time (c : RgbCfg) (k : Nat) : Nat := Nat.mod (c.t0 + k * c.tStep) 2048
+
+def RRef.pixel (e x y lt : Nat) : Nat :=
+  BitVec.toNat (@rgbPixel HwTy.El _ (BitVec.ofNat 2 e) (BitVec.ofNat 7 x) (BitVec.ofNat 6 y) (BitVec.ofNat 9 lt))
+
+def RRef.go (e lt : Nat) : Nat → Nat → List Nat → List Nat
+  | .zero, k, acc => Hdl.reverse acc
+  | .succ n, k, acc => RRef.go e lt n (k + 1) (.cons (RRef.pixel e (Nat.mod k 96) (Nat.div k 96) lt) acc)
+
+def RRef.frame (t : Nat) : List Nat := RRef.go (Nat.div t 512) (Nat.mod t 512) Rgb.pixels 0 .nil
+
+------------------------------------------------------------------------------------
+-- Pictures: PPM ("P3", text), 8 bits a channel.
+
+def Ppm.chan (v bits : Nat) : Nat := Nat.div (v * 255 + Nat.div (Nat.pow 2 bits - 1) 2) (Nat.pow 2 bits - 1)
+def Ppm.pixel (p : Nat) : String :=
+  Hdl.show (Ppm.chan (Nat.div p 2048) 5) <+> " " <+> Hdl.show (Ppm.chan (Nat.mod (Nat.div p 32) 64) 6) <+> " "
+    <+> Hdl.show (Ppm.chan (Nat.mod p 32) 5) <+> "\n"
+def Ppm.body : List Nat → List String → List String
+  | .nil, acc => Hdl.reverse acc
+  | .cons p ps, acc => Ppm.body ps (.cons (Ppm.pixel p) acc)
+def Ppm.of (pixels : List Nat) : String := "P3\n96 64\n255\n" <+> Hdl.concat (Ppm.body pixels .nil)
+
+------------------------------------------------------------------------------------
+-- Scenarios: `oledrgb` for the first 270000 cycles (the 20 ms after PMODEN, the reset
+-- and the commands up to the clear screen); `oledrgb_fast` until four frames are shown.
+
+def OledRgb.frames : Nat := 4
+def OledRgb.cycles (name : String) : Nat := match Hdl.strEq name "oledrgb" with
+  | .true => 270000
+  | .false => 200000 + (OledRgb.frames + 1) * 196900
+def OledRgb.input (name : String) : List (List Nat) :=
+  Hdl.map (fun (b : Nat) => List.cons b List.nil) (Wave.rep (OledRgb.cycles name) 1 .nil)

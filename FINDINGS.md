@@ -312,6 +312,62 @@ Wanted: a `Package.command`/rule target (inputs, outputs, command line), and
 * **P7 (papercut). Compiling the driver took about twelve minutes** with the IR
   scenarios, before B5 was worked around (grail's cache makes the second build instant).
 
+## The OLED demo (branch `oled-demo`, wiz b6ad475)
+
+A demo for an SSD1306 OLED (Digilent PmodOLED, 128 × 32) on the Pmod connector:
+`src/Icestick/{Oled,Fx,Demo,OledSim}.wiz`, `app/oled.wiz`, README "The OLED demo".
+
+* **G19 (gap). No memory primitive, so no block RAM.** The brief suggested sine and font
+  tables in BRAM (the HX1K has 16 × 4 kbit, all unused). The HDL library has no way to
+  say "memory", and yosys does not turn the emitted multiplexer trees into one. So the
+  tables are logic: the program (49 × 9 bits), a quarter-wave sine (16 × 4), the star
+  table (64 × 7), the message (16 × 4) and the font (80 × 8), as balanced trees on the
+  address bits with constant subtrees folded (`Rom.at`). That turned out cheap: the
+  whole design is 727 logic cells. A larger font or a frame buffer would need
+  `Hw.rom`/`Hw.ram` (a table lookup at values, `$mem`/`SB_RAM40_4K` in Verilog), as G16
+  and G17 asked.
+* **G20 (gap). The value simulation runs about 2000 cycles a second** for this design
+  (1068 netlist nodes; 20000 cycles in 10 s, compiled); the controller alone runs at
+  about 7000. A frame of the 128 × 32 panel is 512 bytes, 8192 cycles at 16 per byte, a
+  frame every 16384 cycles in the simulation's configuration: eight seconds each, so
+  `oled gen` simulates ten frames of `oled_fast` in about two minutes. Building the
+  tables' trees once instead of in every cycle (`RomT`, after G17) made no measurable
+  difference: the time is in the operations at `HwTy.El` themselves (bit vectors as
+  `UIntN`, bundles packed and unpacked every cycle). Wanted: a step function compiled to
+  machine words for simulation.
+* **G21 (gap). Kernel proofs about the serialiser are cheap only in small pieces.** "Every
+  byte is sent right" (256 bytes × 2 idle states × 16 cycles of a 20-node circuit) as one
+  `refl` passed 4 GB and was stopped; as sixteen ranges of sixteen bytes (the pattern of
+  `Loop.range_*`) it checks. G11 again.
+* **B5 (bug, this project's). A memory tree over a list shorter than 2^k was wrong**:
+  `Rom.allEq` on a short last subtree saw only the entries present and folded the whole
+  subtree to the last entry. The kernel proof `RomP.board32` (every address of the
+  program's memory gives the program's entry) found it; the simulations could not, since
+  the program never reaches those addresses. Fixed by padding with zeros.
+* **P8 (papercut). No record update, no numeral patterns, no list literals.**
+  `{ s with on := .true }` does not parse, `| 0, 0 =>` is not a pattern, and every list
+  is a chain of `.cons`. The SSD1306 model keeps its 21 registers in a `List Nat` with
+  named indices instead of a structure, and the program is built from small lists
+  appended. (`if … then … else` does exist now, in `Prelude`; G12 is out of date.)
+* **P9 (papercut). Error messages around a long `.cons` chain mislead.** One parenthesis
+  too many in a 30-line chain gave "type mismatch: expected List Step, inferred List
+  Step → List Step" at its start and "expected 'def', …" in its middle; uses of a
+  definition that failed to elaborate report "no field 'go' in a value of type Type"
+  (like P6) rather than "this definition has errors".
+
+* **The colour port (`oledrgb`, SSD1331).** The module was a PmodOLEDrgb after all.
+  The port reused the serialiser and the effects' building blocks unchanged; the
+  controller's state is five small bundles (sequencer, pins, frame timing, pixel
+  position, serialiser) instead of one structure of thirteen fields, following the IR
+  project's experience that large structures make the compiler crawl. It was written,
+  synthesised (938 cells) and flashed in about an hour, **without any simulation, and
+  worked on the panel the first time**. The datasheet-level program (a list of named
+  steps and commands) and the reuse of the parts that the monochrome design had already
+  had simulated and proved carried it. A frame of 12288 bytes is 196608 cycles: at G20's
+  2000 cycles a second, eight minutes of value simulation for four frames, the same
+  again on the netlist; so `look rgb` (the effects evaluated directly) was what was used
+  to judge the colours.
+
 ## Papercuts
 
 * **P1. Error messages are not bounded.** A mismatch that involves an equation between

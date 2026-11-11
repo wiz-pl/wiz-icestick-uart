@@ -1,0 +1,290 @@
+import Icestick.Oled
+-- An SSD1331 RGB OLED controller (96 × 64, 16-bit colour, RGB 565) on the Pmod connector,
+-- as on a Digilent PmodOLEDrgb: 4-wire SPI with D/C and RES, and two supply switches,
+-- VCCEN (the panel's supply) and PMODEN (the logic's), both on when high.
+--
+-- The same parts as `Icestick.Oled`: the SPI serialiser `spiStep` (the SSD1331 also
+-- samples SDIN on the rising edge of SCLK, most significant bit first; 6 MHz is within
+-- its 150 ns minimum clock cycle), the program as a list of steps compiled to a memory,
+-- and a controller that walks it. Differences: every SSD1331 command byte, arguments
+-- too, goes with D/C low; a pixel is two bytes (red 5, green 6, blue 5 bits, high byte
+-- first), computed when its first byte is sent; and the frame counter advances once per
+-- frame shown (`tStep`), so that a frame shows one time even if it takes longer than
+-- the frame period.
+--
+-- The state is in small groups (a structure of a dozen fields or more makes the
+-- compiler crawl): the sequencer, the pins, the frame timing, the pixel position, the
+-- serialiser.
+
+def D7w : HwTy := HwTy.bits 7
+
+structure RgbCfg where
+  tVdd : Nat      -- cycles after PMODEN comes on
+  tRes : Nat      -- the RES pulse, and the wait after it
+  tVcc : Nat      -- cycles after VCCEN comes on before the display is switched on
+  frameLog : Nat  -- a frame starts at most every 2^frameLog cycles
+  t0 : Nat        -- the frame counter's first value
+  tStep : Nat     -- added to it for every frame shown
+
+-- The board: 20 ms after PMODEN (Digilent's PmodOLEDrgb driver waits 20 ms), a RES pulse of
+-- 1 ms (the SSD1331 asks at least 3 µs) and 1 ms after it, 100 ms between VCCEN and
+-- display on (PmodOLEDrgb reference manual, power-on sequence), a frame every 2^18 cycles
+-- (45.8 frames a second; a frame is 12288 bytes, 196608 cycles at 6 MHz), the frame
+-- counter stepping by 2 (the effects move as fast as on the monochrome panel at 91.6).
+def RgbCfg.board : RgbCfg := RgbCfg.mk 240000 12000 1200000 18 0 2
+-- For simulations: short waits (the RES pulse still above 3 µs), frames back to back.
+def RgbCfg.fast (t0 tStep : Nat) : RgbCfg := RgbCfg.mk 50 40 200 8 t0 tStep
+
+def Rgb.width : Nat := 96
+def Rgb.height : Nat := 64
+def Rgb.pixels : Nat := 6144
+
+------------------------------------------------------------------------------------
+-- The SSD1331's commands (Solomon Systech SSD1331 rev 1.2, section 9, "Command table"),
+-- those the demo uses.
+
+inductive S1331 where
+  | unlock                         -- FD 12  (accept commands)
+  | displayOff                     -- AE
+  | displayOn                      -- AF
+  | remap (m : Nat)                -- A0 m   (addressing, colour order, COM scan, colour depth)
+  | startLine (l : Nat)            -- A1 l
+  | offset (o : Nat)               -- A2 o
+  | normal                         -- A4
+  | multiplex (m : Nat)            -- A8 m   (m + 1 rows)
+  | master (m : Nat)               -- AD m   (8E: external VCC supply)
+  | powerSave (p : Nat)            -- B0 p   (0B: off)
+  | phase (p : Nat)                -- B1 p   (phase 1 and 2 lengths)
+  | clock (c : Nat)                -- B3 c   (divider and oscillator frequency)
+  | prechargeA (v : Nat)           -- 8A v   (second pre-charge speed, colour A)
+  | prechargeB (v : Nat)           -- 8B v
+  | prechargeC (v : Nat)           -- 8C v
+  | prechargeLevel (v : Nat)       -- BB v
+  | vcomh (v : Nat)                -- BE v
+  | current (c : Nat)              -- 87 c   (master current attenuation)
+  | contrastA (c : Nat)            -- 81 c
+  | contrastB (c : Nat)            -- 82 c
+  | contrastC (c : Nat)            -- 83 c
+  | noScroll                       -- 2E
+  | columns (a b : Nat)            -- 15 a b
+  | rows (a b : Nat)               -- 75 a b
+
+def S1331.bytes : S1331 → List Nat
+  | .unlock => .cons 253 (.cons 18 .nil)
+  | .displayOff => .cons 174 .nil
+  | .displayOn => .cons 175 .nil
+  | .remap m => .cons 160 (.cons m .nil)
+  | .startLine l => .cons 161 (.cons l .nil)
+  | .offset o => .cons 162 (.cons o .nil)
+  | .normal => .cons 164 .nil
+  | .multiplex m => .cons 168 (.cons m .nil)
+  | .master m => .cons 173 (.cons m .nil)
+  | .powerSave p => .cons 176 (.cons p .nil)
+  | .phase p => .cons 177 (.cons p .nil)
+  | .clock c => .cons 179 (.cons c .nil)
+  | .prechargeA v => .cons 138 (.cons v .nil)
+  | .prechargeB v => .cons 139 (.cons v .nil)
+  | .prechargeC v => .cons 140 (.cons v .nil)
+  | .prechargeLevel v => .cons 187 (.cons v .nil)
+  | .vcomh v => .cons 190 (.cons v .nil)
+  | .current c => .cons 135 (.cons c .nil)
+  | .contrastA c => .cons 129 (.cons c .nil)
+  | .contrastB c => .cons 130 (.cons c .nil)
+  | .contrastC c => .cons 131 (.cons c .nil)
+  | .noScroll => .cons 46 .nil
+  | .columns a b => .cons 21 (.cons a (.cons b .nil))
+  | .rows a b => .cons 117 (.cons a (.cons b .nil))
+
+------------------------------------------------------------------------------------
+-- The program.
+
+inductive RStep where
+  | vddOn                 -- PMODEN high: the logic supply on
+  | resLow
+  | resHigh
+  | vccOn                 -- VCCEN high: the panel supply on
+  | waitVdd               -- `tVdd` cycles
+  | waitRes               -- `tRes`
+  | waitVcc               -- `tVcc`
+  | send (c : S1331)      -- a command and its arguments (D/C low)
+  | blank                 -- a frame of black (D/C high)
+  | frame                 -- CS high until the frame tick, then CS low
+  | pixels                -- a frame of the demo
+  | again                 -- continue at `frame`
+
+def RStep.code : RStep → Nat
+  | .vddOn => 0
+  | .resLow => 1
+  | .resHigh => 2
+  | .vccOn => 3
+  | .waitVdd => 4
+  | .waitVcc => 5
+  | .blank => 6
+  | .frame => 7
+  | .pixels => 8
+  | .again => 9
+  | .waitRes => 10
+  | .send _ => 15
+
+def RProg.sends : List S1331 → List RStep → List RStep
+  | .nil, rest => rest
+  | .cons c cs, rest => .cons (RStep.send c) (RProg.sends cs rest)
+
+-- the whole panel as the window
+def RProg.window (rest : List RStep) : List RStep :=
+  .cons (RStep.send (S1331.columns 0 95)) (.cons (RStep.send (S1331.rows 0 63)) rest)
+
+-- The power-on sequence of the PmodOLEDrgb reference manual (apply VCC; display off;
+-- initialise; clear the screen; VCCEN on; 100 ms; display on), with the reset pulse and
+-- the settings of Digilent's PmodOLEDrgb driver: unlocked; 65k colours, column 95 at
+-- SEG0, COM scanned backwards, odd/even COM split (A0 72: the picture upright with the
+-- pins at the top); 64 rows; external VCC; power saving off; its phase, clock,
+-- pre-charge, VCOMH, current and contrast values.
+def RProg.settings : List S1331 :=
+  (.cons S1331.unlock (.cons S1331.displayOff (.cons (S1331.remap 114) (.cons (S1331.startLine 0) (.cons (S1331.offset 0) (.cons S1331.normal (.cons (S1331.multiplex 63) (.cons (S1331.master 142) (.cons (S1331.powerSave 11) (.cons (S1331.phase 49) (.cons (S1331.clock 240) (.cons (S1331.prechargeA 100) (.cons (S1331.prechargeB 120) (.cons (S1331.prechargeC 100) (.cons (S1331.prechargeLevel 58) (.cons (S1331.vcomh 62) (.cons (S1331.current 6) (.cons (S1331.contrastA 145) (.cons (S1331.contrastB 80) (.cons (S1331.contrastC 125) (.cons S1331.noScroll .nil)))))))))))))))))))))
+
+def RProg.power : List RStep :=
+  .cons RStep.vddOn (.cons RStep.waitVdd (.cons RStep.resLow (.cons RStep.waitRes
+    (.cons RStep.resHigh (.cons RStep.waitRes .nil)))))
+
+def RProg.finish : List RStep :=
+  RProg.window (.cons RStep.blank (.cons RStep.vccOn (.cons RStep.waitVcc (.cons (RStep.send S1331.displayOn) .nil))))
+
+def RProg.init : List RStep := List.append RProg.power (RProg.sends RProg.settings RProg.finish)
+
+def RProg.loop : List RStep := .cons RStep.frame (RProg.window (.cons RStep.pixels (.cons RStep.again .nil)))
+
+def RProg.steps : List RStep := List.append RProg.init RProg.loop
+
+def RProg.entries : List RStep → List Nat
+  | .nil => .nil
+  | .cons s ss => match s with
+    | .send c => List.append (S1331.bytes c) (RProg.entries ss)
+    | _ => .cons (256 + RStep.code s) (RProg.entries ss)
+
+def RProg.rom : List Nat := RProg.entries RProg.steps
+def RProg.frameAt : Nat := List.length (RProg.entries RProg.init)
+def RProg.tree : RomT := RomT.build 7 RProg.rom
+
+def RProg.cmdsOf : List RStep → List Nat
+  | .nil => .nil
+  | .cons s ss => match s with
+    | .send c => List.append (S1331.bytes c) (RProg.cmdsOf ss)
+    | _ => RProg.cmdsOf ss
+
+------------------------------------------------------------------------------------
+-- The controller.
+
+-- the sequencer: program counter, the wait
+structure RSeq (r : HwTy → Type) where
+  pc : r D7w
+  armed : r Bit
+  wait : r D21
+  deriving Bundle
+
+-- the pins, as levels: PMODEN, VCCEN (high: on), RES, CS, D/C
+structure RPins (r : HwTy → Type) where
+  pmoden : r Bit
+  vccen : r Bit
+  res : r Bit
+  cs : r Bit
+  dc : r Bit
+  deriving Bundle
+
+-- the frame timer, a tick not yet taken, the frame counter
+structure RFrame (fl : Nat) (r : HwTy → Type) where
+  timer : r (HwTy.bits fl)
+  pend : r Bit
+  t : r D11
+  deriving Bundle
+
+-- the pixel being sent (column, row), whether its high byte has gone, its low byte
+structure RGen (r : HwTy → Type) where
+  x : r D7w
+  y : r D6
+  half : r Bit
+  lo : r D8
+  deriving Bundle
+
+structure RCtl (fl : Nat) (r : HwTy → Type) where
+  sq : RSeq r
+  pins : RPins r
+  fr : RFrame fl r
+  gen : RGen r
+  spi : Spi r
+  deriving Bundle
+
+def RCtl.init (c : RgbCfg) : RCtl c.frameLog HwTy.El :=
+  RCtl.mk (RSeq.mk (BitVec.ofNat 7 0) (BitVec.ofNat 1 0) (BitVec.ofNat 21 0))
+    (RPins.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 1) (BitVec.ofNat 1 1) (BitVec.ofNat 1 0))
+    (RFrame.mk (BitVec.ofNat c.frameLog 0) (BitVec.ofNat 1 0) (BitVec.ofNat 11 c.t0))
+    (RGen.mk (BitVec.ofNat 7 0) (BitVec.ofNat 6 0) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0))
+    Spi.init
+
+def rctlShowing {r : HwTy → Type} [Hw r] {ω fl : Nat} (s : RCtl fl r) : r Bit :=
+  bnot (Hw.ult s.sq.pc (Hw.lit 7 RProg.frameAt))
+
+-- the step's decoded entry
+structure ROp (r : HwTy → Type) where
+  cmd : r Bit
+  vdd : r Bit
+  resLo : r Bit
+  resHi : r Bit
+  vcc : r Bit
+  wait : r Bit
+  blank : r Bit
+  frame : r Bit
+  pix : r Bit
+  again : r Bit
+
+def ROp.of {r : HwTy → Type} [Hw r] (e : r D9) : ROp r :=
+  let code := Hw.slice 0 4 e;
+  let isOp := fun (k : Nat) => band (Hw.slice 8 1 e) (eqLit code k);
+  ROp.mk (bnot (Hw.slice 8 1 e)) (isOp 0) (isOp 1) (isOp 2) (isOp 3)
+    (bor (isOp 4) (bor (isOp 5) (isOp 10))) (isOp 6) (isOp 7) (isOp 8) (isOp 9)
+
+-- one cycle (`rom`: `RProg.tree`); `color` is the pixel at (s.gen.x, s.gen.y) for frame
+-- s.fr.t
+def rctlStep {r : HwTy → Type} [Hw r] (c : RgbCfg) (rom : RomT) (s : RCtl c.frameLog r) (color : r (HwTy.bits 16)) : r (RCtl.code c.frameLog) :=
+  let e := Rom.at 9 s.sq.pc rom;
+  let op := ROp.of e;
+  let ready := spiReady s.spi;
+  let g := s.gen;
+  let p := s.pins;
+  let f := s.fr;
+  let sq := s.sq;
+  let isData := bor op.blank op.pix;
+  let lastX := eqLit g.x (Rgb.width - 1);
+  let lastPixel := band lastX (eqLit g.y (Rgb.height - 1));
+  let loadData := band isData ready;
+  let loadCmd := band op.cmd ready;
+  let waitDone := band sq.armed (eqLit sq.wait 0);
+  let frameGo := band op.frame (band p.cs f.pend);
+  let adv := band ready (bor op.cmd (bor op.vdd (bor op.resLo (bor op.resHi (bor op.vcc
+    (bor (band op.wait waitDone) (bor frameGo (band loadData (band g.half lastPixel)))))))));
+  let tick := eqLit f.timer (Nat.pow 2 c.frameLog - 1);
+  let col := Hw.mux op.pix color (Hw.lit 16 0);
+  let byte := Hw.mux op.cmd (Hw.slice 0 8 e) (Hw.mux g.half g.lo (Hw.slice 8 8 col));
+  let code := Hw.slice 0 4 e;
+  let waitLen := Hw.mux (eqLit code 5) (Hw.lit 21 c.tVcc) (Hw.mux (eqLit code 4) (Hw.lit 21 c.tVdd) (Hw.lit 21 c.tRes));
+  let nextPix := band loadData g.half;
+  RCtl.pack c.frameLog (RCtl.mk
+    (RSeq.mk
+      (Hw.mux (band ready op.again) (Hw.lit 7 RProg.frameAt) (Hw.mux adv (inc sq.pc) sq.pc))
+      (band op.wait (band ready (bnot waitDone)))
+      (Hw.mux (band op.wait (bnot sq.armed)) waitLen (Hw.mux (eqLit sq.wait 0) sq.wait (dec sq.wait))))
+    (RPins.mk
+      (Hw.mux (band ready op.vdd) hi p.pmoden)
+      (Hw.mux (band ready op.vcc) hi p.vccen)
+      (Hw.mux (band ready op.resLo) lo (Hw.mux (band ready op.resHi) hi p.res))
+      (Hw.mux (band ready op.frame) (bnot (band f.pend p.cs)) (Hw.mux (band ready op.vdd) lo p.cs))
+      (Hw.mux loadCmd lo (Hw.mux loadData hi p.dc)))
+    (RFrame.mk (inc f.timer)
+      (Hw.mux tick hi (Hw.mux frameGo lo f.pend))
+      (Hw.mux frameGo (Hw.add f.t (Hw.lit 11 c.tStep)) f.t))
+    (RGen.mk
+      (Hw.mux nextPix (Hw.mux lastX (Hw.lit 7 0) (inc g.x)) g.x)
+      (Hw.mux (band nextPix lastX) (inc g.y) g.y)
+      (Hw.mux loadData (bnot g.half) g.half)
+      (Hw.mux (band loadData (bnot g.half)) (Hw.slice 0 8 col) g.lo))
+    (Spi.unpack (spiStep s.spi (bor loadCmd loadData) byte)))
