@@ -1,5 +1,6 @@
 import Icestick.Designs
 import Icestick.Wave
+import Icestick.IrSim
 -- The board (Lattice iCEstick, iCE40HX1K-TQ144) and the files the tools want: the pin
 -- constraints, a Verilog test bench that replays a trace, and the trace.
 
@@ -11,14 +12,30 @@ def Board.pins : List Pin :=
   (.cons (Pin.bus "leds" (.cons 99 (.cons 98 (.cons 97 (.cons 96 (.cons 95 .nil)))))) .nil))  -- LED1 … LED5
 def Board.clk : Nat := 21
 
+-- The IrDA transceiver (Vishay TFDU4101), from the iCEstick user guide (Lattice EB82,
+-- table 2): TXD 105 (FPGA -> transceiver, high: LED on), RXD 106 (transceiver -> FPGA,
+-- low: light), SD 107 (shutdown, high: off; the designs drive it low).
+def Ir.pins : List Pin := List.append Board.pins
+  (.cons (Pin.one "ir_tx" 105) (.cons (Pin.one "ir_rx" 106) (.cons (Pin.one "ir_sd" 107) .nil)))
+
 ------------------------------------------------------------------------------------
 -- The designs, and for each what the host does and what must come back.
+
+-- the UART bit of `ir_fast` (cycles)
+def IrFast.bit : Nat := 16
 
 def Top.designs : List Design :=
   .cons (Circuit.design "blinky" blinky)
   (.cons (Circuit.design "hello" (hello clocksPerBit 22))
   (.cons (Circuit.design "echo" (echo clocksPerBit))
-  (.cons (Circuit.design "proto" (proto clocksPerBit)) .nil)))
+  (.cons (Circuit.design "proto" (proto clocksPerBit))
+  (.cons (Circuit.design "ir" (blaster IrCfg.board clocksPerBit))
+  (.cons (Circuit.design "ir_fast" (blaster IrCfg.fast IrFast.bit)) .nil)))))
+
+def Top.isIr (name : String) : Bool := String.startsWith name "ir"
+def Top.pins (name : String) : List Pin := match Top.isIr name with
+  | .true => Ir.pins
+  | .false => Board.pins
 
 -- the host's bit period at 115200 baud and a 12 MHz clock: 625/6 cycles
 def Host.num : Nat := 625
@@ -48,3 +65,106 @@ def Top.expect (name : String) : List Nat := match Hdl.strEq name "echo", Hdl.st
   | _, _ => match Hdl.strEq name "hello" with
     | .true => helloText
     | .false => .nil
+
+------------------------------------------------------------------------------------
+-- The IR blaster's scenarios. The host types lines (each followed by CR) and waits for
+-- the answer; the design's TXD goes back to its RXD through the model of the
+-- transceiver (`IrSim.run`); in `ir_fast` a remote control sends a frame and a repeat
+-- code while the board listens.
+--
+-- `ir` is the board's design (the real timing), with lines that send no frame (a frame
+-- takes 90 ms, 1.1 million cycles, too many for the netlist and Verilog replays: the
+-- frames are tested in `ir_fast` and, at the real timing, by tests/ir.wiz); `ir_fast` is
+-- the same circuit with a 16-cycle UART bit and 25 times faster IR timing
+-- (`IrCfg.fast`).
+
+
+def IrScn.cr (s : String) : List Nat := List.append (Txt.codes s) (.cons 13 .nil)
+-- the board's lines; "listex<BS>n" is "listen" (a 0 in a line: the host pauses, as a
+-- person typing would: bytes that arrive while the board answers are dropped, and a
+-- backspace is answered with three bytes)
+def IrScn.boardLines : List (List Nat) :=
+  .cons (IrScn.cr "help") (.cons (IrScn.cr "xyz") (.cons (List.append (Txt.codes "listex") (.cons 8 (.cons 0 (IrScn.cr "n")))) .nil))
+def IrScn.fastLines : List (List Nat) :=
+  .cons (IrScn.cr "on") (.cons (IrScn.cr "power") (.cons (IrScn.cr "off") (.cons (IrScn.cr "raw 04FB 08")
+  (.cons (IrScn.cr "raw 20 df") (.cons (IrScn.cr "raw 0g 08") (.cons (IrScn.cr "listen") .nil))))))
+
+-- each line, then a pause of `gap` cycles
+def IrScn.typed : List Nat → List Ev → List Ev
+  | .nil, rest => rest
+  | .cons b bs, rest => match Nat.beq b 0 with
+    | .true => .cons (Ev.idle 40000) (IrScn.typed bs rest)
+    | .false => .cons (Ev.byte b) (IrScn.typed bs rest)
+def IrScn.events (gap : Nat) : List (List Nat) → List Ev
+  | .nil => .nil
+  | .cons l ls => IrScn.typed l (.cons (Ev.idle gap) (IrScn.events gap ls))
+
+-- cycles: the banner's time first, then the lines; for `ir_fast` the remote's frame
+-- starts 600 bit periods after the last line, and a key ends the listening 400 bit
+-- periods after the remote's last light
+def IrScn.boardUart : List Nat := Wave.events Host.num Host.den
+  (.cons (Ev.idle 60000) (List.append (IrScn.events 70000 IrScn.boardLines) (.cons (Ev.byte 113) (.cons (Ev.idle 10000) .nil))))
+def IrScn.fastHost : List Ev := .cons (Ev.idle 6000) (IrScn.events 64000 IrScn.fastLines)
+def IrScn.fastUart0 : List Nat := Wave.events IrFast.bit 1 IrScn.fastHost
+def IrScn.remoteAt : Nat := List.length IrScn.fastUart0 - 54400
+def IrScn.remoteRuns : List Nat := List.append (Nec.runs (Nec.word Lg.addr Lg.power)) (.cons 40 Nec.repeatRuns)
+def IrScn.remote : List Nat := Remote.light (IrCfg.unit IrCfg.fast) 17 6 IrScn.remoteAt IrScn.remoteRuns
+def IrScn.fastUart : List Nat := Wave.events IrFast.bit 1
+  (List.append IrScn.fastHost (.cons (Ev.idle (List.length IrScn.remote - List.length IrScn.fastUart0 + 400 * IrFast.bit))
+    (.cons (Ev.byte 113) (.cons (Ev.idle 4000) .nil))))
+
+def IrScn.run (name : String) : List (List Nat) × List (List Nat) := match Hdl.strEq name "ir" with
+  | .true => IrSim.run (blaster IrCfg.board clocksPerBit) 26 IrScn.boardUart .nil (List.length IrScn.boardUart)
+  | .false => IrSim.run (blaster IrCfg.fast IrFast.bit) 2 IrScn.fastUart IrScn.remote (List.length IrScn.fastUart)
+
+-- What the board must say. Typed characters come back; a backspace as BS, space, BS.
+def Spec.echo : List Nat → List Nat
+  | .nil => .nil
+  | .cons c cs => match Bool.or (Nat.beq c 13) (Nat.beq c 0), Nat.beq c 8 with
+    | .true, _ => Spec.echo cs
+    | _, .true => .cons 8 (.cons 32 (.cons 8 (Spec.echo cs)))
+    | _, _ => .cons c (Spec.echo cs)
+def Spec.crlf (rest : List Nat) : List Nat := .cons 13 (.cons 10 rest)
+def Spec.prompt : List Nat := Txt.codes "ir> "
+def Spec.say (s : String) : List Nat := Spec.crlf (List.append (Txt.codes s) (Spec.crlf Spec.prompt))
+def Spec.banner : List Nat := Spec.say "Wiz IR blaster. help"
+def Spec.sent (w : Nat) : List Nat :=
+  Spec.crlf (List.append (Txt.codes "sent ") (Spec.frame w (List.append (Txt.codes ", echo ok") (Spec.crlf Spec.prompt))))
+def Spec.listening : List Nat := Spec.crlf (List.append (Txt.codes "listening, key stops") (Spec.crlf .nil))
+def Spec.rx (w : Nat) : List Nat := List.append (Txt.codes "rx ") (Spec.frame w (Spec.crlf .nil))
+def Spec.rxRepeat : List Nat := List.append (Txt.codes "rx repeat") (Spec.crlf .nil)
+
+def Spec.lines : List (List Nat) → List (List Nat) → List Nat
+  | .nil, .nil => .nil
+  | .cons l ls, .cons a as => List.append (Spec.echo l) (List.append a (Spec.lines ls as))
+  | _, _ => .nil
+
+def Spec.help : List Nat := Spec.say "on off power raw AA[AA] CC listen"
+def Spec.unknown : List Nat := Spec.say "what? (help)"
+def Spec.stop : List Nat := Spec.crlf Spec.prompt
+
+def IrScn.boardExpect : List Nat := List.append Spec.banner
+  (List.append (Spec.lines IrScn.boardLines (.cons Spec.help (.cons Spec.unknown (.cons Spec.listening .nil)))) Spec.stop)
+-- the frames `ir_fast` sends
+def IrScn.fastWords : List Nat :=
+  .cons (Nec.word Lg.addr Lg.on) (.cons (Nec.word Lg.addr Lg.power) (.cons (Nec.word Lg.addr Lg.off)
+  (.cons (Nec.wordX 4 251 8) (.cons (Nec.word 32 223) .nil))))
+def IrScn.fastExpect : List Nat := List.append Spec.banner
+  (List.append (Spec.lines IrScn.fastLines
+    (.cons (Spec.sent (Nec.word Lg.addr Lg.on)) (.cons (Spec.sent (Nec.word Lg.addr Lg.power))
+    (.cons (Spec.sent (Nec.word Lg.addr Lg.off)) (.cons (Spec.sent (Nec.wordX 4 251 8))
+    (.cons (Spec.sent (Nec.word 32 223)) (.cons Spec.unknown (.cons Spec.listening .nil))))))))
+    (List.append (Spec.rx (Nec.word Lg.addr Lg.power)) (List.append Spec.rxRepeat Spec.stop)))
+
+-- by design name: the input leaves of every cycle, the bit period of the serial port
+-- (cycles), and the bytes the board must send
+def Top.inputLeaves (name : String) : List (List Nat) := match Top.isIr name with
+  | .true => (IrScn.run name).1
+  | .false => Hdl.map (fun (b : Nat) => List.cons b List.nil) (Top.input name)
+def Top.bitCycles (name : String) : Nat := match Hdl.strEq name "ir_fast" with
+  | .true => IrFast.bit
+  | .false => clocksPerBit
+def Top.expectAll (name : String) : List Nat := match Top.isIr name, Hdl.strEq name "ir" with
+  | .true, .true => IrScn.boardExpect
+  | .true, .false => IrScn.fastExpect
+  | _, _ => Top.expect name

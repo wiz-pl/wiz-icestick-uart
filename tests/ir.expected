@@ -1,0 +1,23 @@
+necWordX = Nec.word on 65536 of 65536 (address, command) pairs
+LG codes: power 20DF10EF, on 20DF23DC, off 20DFA35C
+encoder, unit 270 cycles, carrier 3/16, frame 20DF10EF:
+  carrier: 831 pulses, 831 of them 3 cycles long; 797 of 797 periods within a mark 16 cycles
+  busy 43470 cycles = 161 units + 0
+  frames on the TXD pin:
+    20DF10EF (whole units: yes)
+  as specified, to the cycle: yes
+  decoded from the echo: yes
+encoder, unit 270 cycles, carrier 3/16, frame 20DF23DC:
+  carrier: 831 pulses, 831 of them 3 cycles long; 797 of 797 periods within a mark 16 cycles
+  busy 43470 cycles = 161 units + 0
+  frames on the TXD pin:
+    20DF23DC (whole units: yes)
+  as specified, to the cycle: yes
+  decoded from the echo: yes
+encoder, unit 270 cycles, carrier 3/16, frame 482C6A95:
+  carrier: 831 pulses, 831 of them 3 cycles long; 797 of 797 periods within a mark 16 cycles
+  busy 41850 cycles = 155 units + 0
+  frames on the TXD pin:
+    482C6A95 (whole units: yes)
+  as specified, to the cycle: yes
+  decoded from the echo: yes

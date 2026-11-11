@@ -267,6 +267,38 @@ Wanted: a `Package.command`/rule target (inputs, outputs, command line), and
 * A library target and an executable target may have the same name, and
   `grail build NAME` then builds both.
 
+## The IR blaster (branch `ir-blaster`, wiz b6ad475)
+
+* **G16 (gap). A design that fits in the step function may not fit in the FPGA, and
+  nothing says so before nextpnr.** The first version of `ir` took 1411 of 1280 logic
+  cells. Two things cost most: comparisons with a constant (`Hw.ult x (Hw.lit n k)`)
+  become carry chains in yosys (a logic cell per bit; 281 `SB_CARRY` cells: the
+  decoder's duration thresholds, the hex-digit tests), and the message ROM written as a
+  chain of `mux (eq idx k)` (430 LUTs for 252 entries; a tree on the address bits is
+  300). The fixes are in the design: threshold flags set at `dur == k - 1`, bit tests on
+  characters, 7-bit ROM entries, shorter messages, and no second copy of the frame
+  (the encoder reads the bit it needs from the register the answer is printed from;
+  the decoder shifts into it and compares bit by bit): 1202 cells. A size estimate
+  in the HDL library (count of comparisons with constants, ROM bits) would have caught
+  it earlier; the BRAMs (16 × 4 kbit, unused) would hold the ROM, but the library has
+  no memory primitive.
+* **G17 (gap). The value simulation is strict, so every wire costs every cycle.** A ROM
+  as a balanced tree of multiplexers (better for yosys) made the value simulation
+  several times slower than the chain, because `HwTy.El` evaluates both sides of each
+  `mux` and the tree's leaves are cut out of the list again each cycle. The design
+  keeps the chain. A ROM primitive (`Hw.rom : List Nat → r (bits a) → r (bits w)`,
+  a table lookup at values, a `case` or a BRAM in Verilog) would serve both.
+* **G18 (gap). `grail test` gives every test 60 s, fixed** (Grail/Test.lean). Half a
+  million cycles of the blaster, or one frame of the encoder at the board's timing (1.1
+  million cycles), do not fit, so those checks live in `icestick gen` and the test uses
+  the faster timing. A per-test limit (`-- test: run 600`) would do.
+* **P6 (papercut). `IrCfg.board.unit` does not parse as "field `unit` of the constant
+  `IrCfg.board`"** ("no field 'board' in a value of type Type"); `IrCfg.unit IrCfg.board`
+  works, and so does `cfg.unit` on a variable.
+* **P7 (papercut). Compiling the driver takes about twelve minutes** once
+  `Icestick.Board` imports the IR scenarios (grail's cache makes the second build
+  instant). The checks of the library itself take seconds.
+
 ## Papercuts
 
 * **P1. Error messages are not bounded.** A mismatch that involves an equation between
@@ -286,8 +318,9 @@ Wanted: a `Package.command`/rule target (inputs, outputs, command line), and
 ## Not verified
 
 * **The pin numbers** are those of icestorm's `examples/icestick/icestick.pcf`
-  (clk 21, RX 9, TX 8, LED1 … LED5 = 99 … 95); Lattice's user guide could not be
-  downloaded while this was written. The clock, RX and TX pins are confirmed by the
+  (clk 21, RX 9, TX 8, LED1 … LED5 = 99 … 95); the IrDA pins (TXD 105, RXD 106, SD 107)
+  are from Lattice's iCEstick user guide (EB82, table 2) and confirmed by the board:
+  the decoder reads back each frame the encoder sends. The clock, RX and TX pins are confirmed by the
   board answering; nobody has looked at the LEDs yet.
 * **tower** was only tried as far as installing the toolchain named by
   `wiz-toolchain` (`tower toolchain install`, Nix source, into a private `--home`) and

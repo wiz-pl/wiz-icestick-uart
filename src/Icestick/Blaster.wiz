@@ -1,0 +1,277 @@
+import Icestick.Ir
+import Icestick.Crc
+import Text
+-- The IR blaster: a command prompt on the serial port that sends NEC frames through
+-- the IrDA transceiver, and reports what the transceiver's receiver decodes.
+--
+--   ir> on                 LG POWER ON   (NEC address 0x04, command 0xC4)
+--   ir> off                LG POWER OFF  (0xC5)
+--   ir> power              LG POWER      (0x08, toggles)
+--   ir> raw AA CC          NEC address AA, command CC (hex)
+--   ir> raw AAAA CC        extended NEC: the two address bytes in the order sent
+--   ir> listen             print every frame received, until a key is pressed
+--   ir> help
+--
+-- After a frame the board answers `sent 04 FB C4 3B (20DF23DC), echo ok`: the four
+-- bytes in the order sent, the 32 bits with the first one sent on top (the usual way of
+-- writing NEC codes), and whether the decoder saw that very frame come back (the
+-- TFDU4101 echoes what it sends on its receive pin). Typed characters are echoed;
+-- backspace and ^C work; a line ends with CR or LF (CR LF counts once). Bytes that
+-- arrive while the board is answering are dropped.
+--
+-- LEDs: LED1 sending, LED2 receiving (a leader seen), LED3 listening, LED4 the last frame
+-- sent came back, LED5 (green) on.
+
+def B77 : HwTy := HwTy.bits 77
+
+structure IrPins (r : HwTy → Type) where
+  uart_rx : r Bit
+  ir_rx : r Bit
+  deriving Bundle
+
+structure IrBoard (r : HwTy → Type) where
+  uart_tx : r Bit
+  leds : r B5
+  ir_tx : r Bit
+  ir_sd : r Bit
+  deriving Bundle
+
+------------------------------------------------------------------------------------
+-- What the board says: a read-only memory of 7-bit codes. 0: stop; 1: continue at OK
+-- or NOECHO (did the frame come back?); 2: continue at the prompt; 4: wait until the
+-- encoder is done; 16 + j: hex digit j of the bytes of `shown` in the order sent (digit
+-- 0 is the high nibble of the first byte); 24 + j: hex digit j of the 32 bits reversed
+-- (digit 0 on top); any other code: that character (BS, LF, CR and 32 … 126 are used).
+
+def Txt.codesOf : List Char → List Nat
+  | .nil => .nil
+  | .cons c cs => .cons (Char.code c) (Txt.codesOf cs)
+def Txt.codes (s : String) : List Nat := Txt.codesOf (String.chars s)
+
+def Pr.cond : Nat := 1
+def Pr.prompt : Nat := 2
+def Pr.wait : Nat := 4
+
+def Pr.crlf (rest : List Nat) : List Nat := .cons 13 (.cons 10 rest)
+def Pr.text (s : String) (rest : List Nat) : List Nat := List.append (Txt.codes s) rest
+def Pr.one (c : Nat) (rest : List Nat) : List Nat := .cons c rest
+-- "04 FB C4 3B"
+def Pr.bytes (rest : List Nat) : List Nat :=
+  .cons 16 (.cons 17 (.cons 32 (.cons 18 (.cons 19 (.cons 32 (.cons 20 (.cons 21 (.cons 32
+  (.cons 22 (.cons 23 rest))))))))))
+-- "20DF23DC"
+def Pr.scan (rest : List Nat) : List Nat :=
+  .cons 24 (.cons 25 (.cons 26 (.cons 27 (.cons 28 (.cons 29 (.cons 30 (.cons 31 rest)))))))
+-- "04 FB C4 3B (20DF23DC)"
+def Pr.frame (rest : List Nat) : List Nat := Pr.bytes (Pr.text " (" (Pr.scan (Pr.one 41 rest)))
+
+def Msg.banner : List Nat := Pr.crlf (Pr.text "Wiz IR blaster. help" (Pr.crlf (Pr.one Pr.prompt .nil)))
+def Msg.prompt : List Nat := Pr.text "ir> " (Pr.one 0 .nil)
+def Msg.help : List Nat := Pr.crlf (Pr.text "on off power raw AA[AA] CC listen" (Pr.crlf (Pr.one Pr.prompt .nil)))
+def Msg.sent : List Nat := Pr.crlf (Pr.one Pr.wait (Pr.text "sent " (Pr.frame (Pr.one Pr.cond .nil))))
+def Msg.ok : List Nat := Pr.text ", echo ok" (Pr.crlf (Pr.one Pr.prompt .nil))
+def Msg.noecho : List Nat := Pr.text ", no echo" (Pr.crlf (Pr.one Pr.prompt .nil))
+def Msg.unknown : List Nat := Pr.crlf (Pr.text "what? (help)" (Pr.crlf (Pr.one Pr.prompt .nil)))
+def Msg.listen : List Nat := Pr.crlf (Pr.text "listening, key stops" (Pr.crlf (Pr.one 0 .nil)))
+def Msg.rx : List Nat := Pr.text "rx " (Pr.frame (Pr.crlf (Pr.one 0 .nil)))
+def Msg.rxrep : List Nat := Pr.text "rx repeat" (Pr.crlf (Pr.one 0 .nil))
+def Msg.nl : List Nat := Pr.crlf (Pr.one Pr.prompt .nil)
+def Msg.bs : List Nat := .cons 8 (.cons 32 (.cons 8 (.cons 0 .nil)))
+def Msg.ctrlc : List Nat := Pr.text "^C" (Pr.crlf (Pr.one Pr.prompt .nil))
+
+def Msg.list : List (List Nat) :=
+  .cons Msg.banner (.cons Msg.prompt (.cons Msg.help (.cons Msg.sent (.cons Msg.ok (.cons Msg.noecho
+  (.cons Msg.unknown (.cons Msg.listen (.cons Msg.rx (.cons Msg.rxrep (.cons Msg.nl (.cons Msg.bs
+  (.cons Msg.ctrlc .nil))))))))))))
+
+def Msg.offset : Nat → List (List Nat) → Nat
+  | .zero, _ => 0
+  | .succ k, .nil => 0
+  | .succ k, .cons m ms => List.length m + Msg.offset k ms
+def Msg.concat : List (List Nat) → List Nat
+  | .nil => .nil
+  | .cons m ms => List.append m (Msg.concat ms)
+
+def Msg.rom : List Nat := Msg.concat Msg.list
+def Msg.at (k : Nat) : Nat := Msg.offset k Msg.list
+def Msg.BANNER : Nat := Msg.at 0
+def Msg.PROMPT : Nat := Msg.at 1
+def Msg.HELP : Nat := Msg.at 2
+def Msg.SENT : Nat := Msg.at 3
+def Msg.OK : Nat := Msg.at 4
+def Msg.NOECHO : Nat := Msg.at 5
+def Msg.UNKNOWN : Nat := Msg.at 6
+def Msg.LISTEN : Nat := Msg.at 7
+def Msg.RX : Nat := Msg.at 8
+def Msg.RXREP : Nat := Msg.at 9
+def Msg.NL : Nat := Msg.at 10
+def Msg.BS : Nat := Msg.at 11
+def Msg.CTRLC : Nat := Msg.at 12
+
+-- A ROM with an 8-bit address and 7-bit entries: a chain of multiplexers, one per entry.
+-- (A tree on the address bits is what yosys would like better, but it costs the value
+-- simulation several times the work per cycle.)
+def rom8 {r : HwTy → Type} [Hw r] (idx : r B8) : Nat → List Nat → r B7
+  | _, .nil => Hw.lit 7 0
+  | k, .cons c cs => Hw.mux (eqLit idx k) (Hw.lit 7 c) (rom8 idx (Nat.succ k) cs)
+
+-- hex digit j (of 8) of the bytes in the order sent, and of a 32-bit number
+def byteNib {r : HwTy → Type} [Hw r] (w : r B32) (j : Nat) : r B4 :=
+  Hw.slice (8 * Nat.div j 2 + 4 * (1 - Nat.mod j 2)) 4 w
+def wordNib {r : HwTy → Type} [Hw r] (w : r B32) (j : Nat) : r B4 := Hw.slice (28 - 4 * j) 4 w
+def pick8 {r : HwTy → Type} [Hw r] (sel : r B3) (f : Nat → r B4) : Nat → r B4
+  | .zero => f 0
+  | .succ k => Hw.mux (eqLit sel (Nat.succ k)) (f (Nat.succ k)) (pick8 sel f k)
+
+------------------------------------------------------------------------------------
+-- The command line: the last eleven characters typed (7-bit ASCII), the newest at the
+-- bottom, and
+-- how many there are (up to 15: a longer line is no command).
+
+def chAt {r : HwTy → Type} [Hw r] (line : r B77) (k : Nat) : r B7 := Hw.slice (7 * k) 7 line
+
+-- the characters `cs` at positions k, k-1, …
+def textAt {r : HwTy → Type} [Hw r] (line : r B77) : Nat → List Nat → r Bit
+  | k, .nil => hi
+  | k, .cons c cs => band (eqLit (chAt line k) c) (textAt line (k - 1) cs)
+
+def isWord {r : HwTy → Type} [Hw r] (line : r B77) (len : r B4) (w : String) : r Bit :=
+  band (eqLit len (List.length (Txt.codes w))) (textAt line (List.length (Txt.codes w) - 1) (Txt.codes w))
+
+-- hexadecimal digits, either case (bit tests: a comparison with a constant would take
+-- a carry chain)
+def table4 {r : HwTy → Type} [Hw r] {ω w : Nat} (x : r B4) (f : Nat → Nat) : Nat → r (HwTy.bits w)
+  | .zero => Hw.lit w (f 0)
+  | .succ k => Hw.mux (eqLit x (Nat.succ k)) (Hw.lit w (f (Nat.succ k))) (table4 x f k)
+def hexOk {r : HwTy → Type} [Hw r] (c : r B7) : r Bit :=
+  let lo4 := Hw.slice 0 4 c;
+  let hi3 := Hw.slice 4 3 (Hw.or c (Hw.lit 7 32));
+  Hw.mux (eqLit hi3 3) (table4 lo4 (fun (k : Nat) => Nat.ofBool (Nat.lt k 10)) 15)
+    (band (eqLit hi3 6) (table4 lo4 (fun (k : Nat) => Nat.ofBool (Bool.and (Nat.lt 0 k) (Nat.lt k 7))) 15))
+-- (a letter has bit 6 set, a digit not)
+def hexVal {r : HwTy → Type} [Hw r] (c : r B7) : r B4 :=
+  Hw.mux (Hw.slice 6 1 c) (table4 (Hw.slice 0 4 c) (fun (k : Nat) => Nat.mod (k + 9) 16) 15) (Hw.slice 0 4 c)
+-- an upper-case hex digit
+def hexChar {r : HwTy → Type} [Hw r] (nib : r B4) : r B8 := table4 nib Crc.hex 15
+-- the byte written at positions k, k-1
+def hexByte {r : HwTy → Type} [Hw r] (line : r B77) (k : Nat) : r B8 :=
+  Hw.cat (hexVal (chAt line k)) (hexVal (chAt line (k - 1)))
+def hexAt {r : HwTy → Type} [Hw r] (line : r B77) : List Nat → r Bit
+  | .nil => hi
+  | .cons k ks => band (hexOk (chAt line k)) (hexAt line ks)
+
+------------------------------------------------------------------------------------
+-- The design.
+
+structure Blaster (r : HwTy → Type) where
+  sync : Sync r
+  rx : Rx r
+  tx : Tx r
+  line : r B77
+  len : r B4
+  cr : r Bit
+  pend : r Bit
+  ech : r B8
+  pc : r B8
+  busy : r Bit
+  listen : r Bit
+  shown : r B32
+  seen : r Bit
+  same : r Bit
+  enc : NecTx r
+  dec : NecRx r
+  deriving Bundle
+
+def Blaster.init : Blaster HwTy.El :=
+  Blaster.mk Sync.init Rx.init Tx.init (BitVec.ofNat 77 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0)
+    (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 8 Msg.BANNER) (BitVec.ofNat 1 1) (BitVec.ofNat 1 0)
+    (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) NecTx.init NecRx.init
+
+def lit8 {r : HwTy → Type} [Hw r] (k : Nat) : r B8 := Hw.lit 8 k
+
+def blasterStep {r : HwTy → Type} [Hw r] (cfg : IrCfg) (n : Nat) (s : Blaster r) (x : IrPins r) :
+    r (HwTy.prod Blaster.code IrBoard.code) :=
+  let rr := rxStep n s.rx s.sync.ff2;
+  let got := Byte.unpack (Hw.snd rr);
+  let c := Hw.slice 0 7 got.data;
+  let ascii := bnot (Hw.slice 7 1 got.data);
+  let dr := necRxStep cfg s.dec x.ir_rx;
+  let dg := NecBit.unpack (Hw.snd dr);
+  -- a byte at the prompt (taken only while the board is not answering)
+  let acc := band got.valid (band ascii (band (bnot s.listen) (bnot s.busy)));
+  let isCr := eqLit c 13;
+  let eol := band acc (bor isCr (band (eqLit c 10) (bnot s.cr)));
+  let bsOk := band acc (band (bor (eqLit c 8) (eqLit c 127)) (bnot (eqLit s.len 0)));
+  let ctrlC := band acc (eqLit c 3);
+  -- 32 … 126
+  let printable := band acc (band (bor (Hw.slice 6 1 c) (Hw.slice 5 1 c)) (bnot (eqLit c 127)));
+  let stop := band got.valid s.listen;
+  -- the commands
+  let ln := s.line;
+  let cOn := isWord ln s.len "on";
+  let cOff := isWord ln s.len "off";
+  let cPower := isWord ln s.len "power";
+  let cHelp := bor (isWord ln s.len "help") (isWord ln s.len "?");
+  let cListen := isWord ln s.len "listen";
+  let sp2 := eqLit (chAt ln 2) 32;
+  let raw11 := band (eqLit s.len 11) (band (textAt ln 10 (Txt.codes "raw ")) (band sp2
+    (hexAt ln (.cons 6 (.cons 5 (.cons 4 (.cons 3 (.cons 1 (.cons 0 .nil)))))))));
+  let raw9 := band (eqLit s.len 9) (band (textAt ln 8 (Txt.codes "raw ")) (band sp2
+    (hexAt ln (.cons 4 (.cons 3 (.cons 1 (.cons 0 .nil)))))));
+  let cRaw := bor raw11 raw9;
+  let cSend := bor cOn (bor cOff (bor cPower cRaw));
+  let a0 := Hw.mux raw11 (hexByte ln 6) (Hw.mux raw9 (hexByte ln 4) (lit8 Lg.addr));
+  let a1 := Hw.mux raw11 (hexByte ln 4) (Hw.mux raw9 (Hw.not (hexByte ln 4)) (lit8 (255 - Lg.addr)));
+  let cmd := Hw.mux cRaw (hexByte ln 1) (Hw.mux cOn (lit8 Lg.on) (Hw.mux cOff (lit8 Lg.off) (lit8 Lg.power)));
+  let w := necWordX a0 a1 cmd;
+  let sendNow := band eol cSend;
+  -- frames received while listening
+  let quiet := band s.listen (band (bnot s.busy) (bnot got.valid));
+  let rxShow := band quiet dg.frame;
+  -- the bits of a frame coming in, one by one, against the frame sent
+  let same := band (bor (eqLit dg.idx 0) s.same) (Hw.eq dg.val (bitAt s.shown dg.idx 31));
+  let rxRep := band quiet dg.rpt;
+  -- which message to start
+  let msg := Hw.mux eol
+    (Hw.mux (eqLit s.len 0) (lit8 Msg.NL) (Hw.mux cHelp (lit8 Msg.HELP) (Hw.mux cListen (lit8 Msg.LISTEN)
+      (Hw.mux cSend (lit8 Msg.SENT) (lit8 Msg.UNKNOWN)))))
+    (Hw.mux stop (lit8 Msg.NL) (Hw.mux bsOk (lit8 Msg.BS) (Hw.mux ctrlC (lit8 Msg.CTRLC)
+      (Hw.mux rxShow (lit8 Msg.RX) (lit8 Msg.RXREP)))));
+  let startMsg := bor eol (bor stop (bor bsOk (bor ctrlC (bor rxShow rxRep))));
+  -- the printer
+  let code := rom8 s.pc 0 Msg.rom;
+  let isEnd := eqLit code 0;
+  let isNib := eqLit (Hw.slice 4 3 code) 1;
+  let emit := bnot (bor isEnd (bor (eqLit code Pr.cond) (bor (eqLit code Pr.prompt) (eqLit code Pr.wait))));
+  let sendCh := band s.busy (band emit (band (txIdle s.tx) (bnot s.pend)));
+  let sel := Hw.slice 0 3 code;
+  let nib := Hw.mux (Hw.slice 3 1 code) (pick8 sel (wordNib (scan32 s.shown)) 7) (pick8 sel (byteNib s.shown) 7);
+  let ch := Hw.mux isNib (hexChar nib) (Hw.cat (Hw.lit 1 0) code);
+  let next := Hw.mux sendCh (inc s.pc)
+    (Hw.mux (eqLit code Pr.cond) (Hw.mux s.seen (lit8 Msg.OK) (lit8 Msg.NOECHO))
+    (Hw.mux (eqLit code Pr.prompt) (lit8 Msg.PROMPT)
+    (Hw.mux (band (eqLit code Pr.wait) (bnot s.enc.busy)) (inc s.pc) s.pc)));
+  -- the transmitter: an echoed character first
+  let echoGo := band s.pend (txIdle s.tx);
+  let leds := Hw.cat hi (Hw.cat s.seen (Hw.cat s.listen (Hw.cat (bnot (eqLit s.dec.ph 0)) s.enc.busy)));
+  Hw.pair
+    (Blaster.pack (Blaster.mk (Sync.unpack (syncStep s.sync x.uart_rx)) (Rx.unpack (Hw.fst rr))
+      (Tx.unpack (txStep n s.tx (bor echoGo sendCh) (Hw.mux s.pend s.ech ch)))
+      (Hw.mux bsOk (Hw.cat (Hw.lit 7 0) (Hw.slice 7 70 ln)) (Hw.mux printable (Hw.cat (Hw.slice 0 70 ln) c) ln))
+      (Hw.mux (bor eol ctrlC) (Hw.lit 4 0) (Hw.mux bsOk (dec s.len)
+        (Hw.mux (band printable (bnot (eqLit s.len 15))) (inc s.len) s.len)))
+      (Hw.mux got.valid isCr s.cr)
+      (Hw.mux printable hi (Hw.mux echoGo lo s.pend))
+      (Hw.mux printable got.data s.ech)
+      (Hw.mux startMsg msg (Hw.mux s.busy next s.pc))
+      (Hw.mux startMsg hi (Hw.mux isEnd lo s.busy))
+      (Hw.mux (band eol cListen) hi (Hw.mux stop lo s.listen))
+      (Hw.mux sendNow w (Hw.mux (band s.listen dg.bitv) (shr32 s.shown dg.val) s.shown))
+      (Hw.mux sendNow lo (Hw.mux (band dg.frame same) hi s.seen))
+      (Hw.mux dg.bitv same s.same)
+      (NecTx.unpack (necTxStep cfg s.enc sendNow (Hw.mux sendNow w s.shown)))
+      (NecRx.unpack (Hw.fst dr))))
+    (IrBoard.pack (IrBoard.mk s.tx.line leds s.enc.out lo))
+
+def blaster (cfg : IrCfg) (n : Nat) : Circuit IrPins.code IrBoard.code :=
+  Circuit.bundled Blaster.bundle IrPins.bundle IrBoard.bundle Blaster.init (blasterStep cfg n)

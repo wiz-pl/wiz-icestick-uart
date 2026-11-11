@@ -1,0 +1,102 @@
+-- test: run
+import Icestick.Board
+import IO
+-- The IR blaster in simulation.
+--  1. the frame's bits for every command byte (hardware against the specification);
+--  2. the encoder alone (with `IrCfg.fast`: the board's timing takes 1.1 million cycles
+--     a frame, longer than grail's 60 s per test; the board's carrier and unit counters
+--     are proved in `Icestick.Proofs.Ir`), LG POWER, ON and an extended frame: the TXD waveform is cut into
+--     carrier pulses, marks and a frame, which must be the specification's to the cycle;
+--     its echo through the transceiver model into the decoder must give the frame back;
+-- (The whole design at its prompt, the frames it sends and a remote's frame while it
+-- listens are checked by `icestick gen`, designs `ir` and `ir_fast`: half a million
+-- cycles of the whole design take longer than grail's 60 s per test.)
+
+def showBytes : List Nat → String
+  | .nil => ""
+  | .cons x xs => String.mk (.cons (Char.mk (match Nat.lt x 32 with
+      | .true => 46
+      | .false => x)) .nil) <+> showBytes xs
+
+def yes (b : Bool) : String := match b with
+  | .true => "yes"
+  | .false => "NO"
+
+def hexOf (w : Nat) : String := showBytes (Spec.hex8 w .nil)
+
+-- 1.
+def hwWord (a0 a1 c : Nat) : Nat :=
+  BitVec.toNat (@necWordX HwTy.El _ (BitVec.ofNat 8 a0) (BitVec.ofNat 8 a1) (BitVec.ofNat 8 c))
+def agree : Nat → Nat → Nat → Nat
+  | a, .zero, acc => acc
+  | a, .succ c, acc => agree a c (acc + Nat.ofBool (Nat.beq (hwWord a (255 - a) c) (Nec.word a c)))
+def agreeAll : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ a, acc => agreeAll a (agree a 256 acc)
+
+-- 2. The encoder, then the transceiver (RXD low for 26 cycles from each rising edge of
+--    the light), then the decoder: the TXD pin of every cycle, the busy cycles, and the
+--    frames decoded.
+def Enc.go (cfg : IrCfg) (w : Nat) :
+    Nat → HwTy.El (necTxC cfg).st → HwTy.El (necRxC cfg).st → Nat → Nat → HwTy.El NecSend.code →
+      List Nat → Nat → List Nat → List Nat × (Nat × List Nat)
+  | .zero, s, d, prev, left, x, tx, busy, got => (Hdl.reverse tx, (busy, Hdl.reverse got))
+  | .succ k, s, d, prev, left, x, tx, busy, got =>
+    let ω r : HwTy.El (necTxC cfg).st × HwTy.El IrLine.code := Circuit.stepEl (necTxC cfg) s x;
+    let ω o : IrLine HwTy.El := Bundle.ofEl IrLine.bundle r.2;
+    let ω out := BitVec.toNat o.ir_tx;
+    let ω left2 := (match Bool.and (Nat.beq out 1) (Nat.beq prev 0) with
+      | .true => 2
+      | .false => left - 1);
+    let ω rxd := Nat.ofBool (Nat.beq left2 0);
+    let ω dr : HwTy.El (necRxC cfg).st × HwTy.El NecGot.code :=
+      Circuit.stepEl (necRxC cfg) d (Bundle.toEl IrIn.bundle (IrIn.mk (BitVec.ofNat 1 rxd)));
+    let ω g : NecGot HwTy.El := Bundle.ofEl NecGot.bundle dr.2;
+    Enc.go cfg w k r.1 dr.1 out left2 (Bundle.toEl NecSend.bundle (NecSend.mk (BitVec.ofNat 1 0) (BitVec.ofNat 32 w)))
+      (.cons out tx) (busy + BitVec.toNat o.busy)
+      (match BitVec.isTrue g.frame with
+        | .true => .cons (BitVec.toNat g.word) got
+        | .false => got)
+
+def Enc.run (cfg : IrCfg) (w cycles : Nat) : List Nat × (Nat × List Nat) :=
+  Enc.go cfg w cycles (necTxC cfg).init (necRxC cfg).init 0 0
+    (Bundle.toEl NecSend.bundle (NecSend.mk (BitVec.ofNat 1 1) (BitVec.ofNat 32 w))) .nil 0 .nil
+
+def Frame.show (f : Frame) : String := match Ana.word f.runs with
+  | .some w => hexOf (Nec.scancode w) <+> " (whole units: " <+> yes f.exact <+> ")"
+  | .none => "not a NEC frame"
+
+def showFrames : List Frame → String
+  | .nil => ""
+  | .cons f fs => "    " <+> Frame.show f <+> "\n" <+> showFrames fs
+
+def framesOk : List Frame → List Nat → Bool
+  | .nil, .nil => .true
+  | .cons f fs, .cons w ws => Bool.and (Bool.and f.exact (Hdl.natsEq f.runs (Nec.runs w))) (framesOk fs ws)
+  | _, _ => .false
+
+def carrier (cfg : IrCfg) (tx : List Nat) : String :=
+  let ω ps := Ana.pulses tx;
+  let ω per := Ana.periods cfg.carP ps 0 0 0;
+  Hdl.show (List.length ps) <+> " pulses, " <+> Hdl.show (Ana.widthsOk cfg.carOn ps 0) <+> " of them "
+    <+> Hdl.show cfg.carOn <+> " cycles long; " <+> Hdl.show per.1 <+> " of " <+> Hdl.show per.2
+    <+> " periods within a mark " <+> Hdl.show cfg.carP <+> " cycles"
+
+def encoderReport (cfg : IrCfg) (w : Nat) : IO Unit := do
+  let r := Enc.run cfg w (170 * cfg.unit);
+  let fs := Ana.frames cfg r.1;
+  IO.println ("encoder, unit " <+> Hdl.show cfg.unit <+> " cycles, carrier " <+> Hdl.show cfg.carOn <+> "/"
+    <+> Hdl.show cfg.carP <+> ", frame " <+> hexOf (Nec.scancode w) <+> ":");
+  IO.println ("  carrier: " <+> carrier cfg r.1);
+  IO.println ("  busy " <+> Hdl.show r.2.1 <+> " cycles = " <+> Hdl.show (Nat.div r.2.1 cfg.unit) <+> " units + "
+    <+> Hdl.show (Nat.mod r.2.1 cfg.unit));
+  IO.println ("  frames on the TXD pin:\n" <+> showFrames fs <+> "  as specified, to the cycle: " <+> yes (framesOk fs (.cons w .nil)));
+  IO.println ("  decoded from the echo: " <+> yes (Hdl.natsEq r.2.2 (.cons w .nil)))
+
+def main : IO Unit := do
+  IO.println ("necWordX = Nec.word on " <+> Hdl.show (agreeAll 256 0) <+> " of 65536 (address, command) pairs");
+  IO.println ("LG codes: power " <+> hexOf (Nec.scancode (hwWord 4 251 Lg.power)) <+> ", on "
+    <+> hexOf (Nec.scancode (hwWord 4 251 Lg.on)) <+> ", off " <+> hexOf (Nec.scancode (hwWord 4 251 Lg.off)));
+  encoderReport IrCfg.fast (Nec.word Lg.addr Lg.power);
+  encoderReport IrCfg.fast (Nec.word Lg.addr Lg.on);
+  encoderReport IrCfg.fast (Nec.wordX 18 52 86)

@@ -1,0 +1,246 @@
+import Icestick.Uart
+-- Consumer infrared, NEC protocol: an encoder that drives the iCEstick's IrDA
+-- transceiver (Vishay TFDU4101) with a 38 kHz carrier, and a decoder for what the
+-- transceiver's receiver reports. Both as step functions over bundles, polymorphic in
+-- the representation like the UART; the timing constants come from an `IrCfg` (meta-level
+-- numbers: only the constants of the comparisons depend on it).
+--
+-- NEC (as in Linux, drivers/media/rc/ir-nec-decoder.c): a unit is 562.5 µs. A frame is a
+-- mark (carrier on) of 16 units, a space of 8, then 32 bits, least significant first,
+-- each a mark of 1 unit and a space of 1 unit (0) or 3 units (1), then a final mark of
+-- 1 unit. The bits are the address byte, its complement, the command byte and its
+-- complement (extended NEC: two address bytes, no complement). A repeat code (a key
+-- held) is a mark of 16, a space of 4 and a mark of 1.
+
+def B3 : HwTy := HwTy.bits 3
+def B6 : HwTy := HwTy.bits 6
+def B9w : HwTy := HwTy.bits 9
+def B10 : HwTy := HwTy.bits 10
+def B13 : HwTy := HwTy.bits 13
+def B18 : HwTy := HwTy.bits 18
+def B32 : HwTy := HwTy.bits 32
+
+structure IrCfg where
+  unit : Nat    -- clock cycles per NEC unit
+  carP : Nat    -- clock cycles per carrier period
+  carOn : Nat   -- of which the LED is on
+  hold : Nat    -- the decoder's envelope: light seen within this many cycles
+
+-- The board: 12 MHz. 562.5 µs = 6750 cycles exactly. The carrier is 12 MHz / 316 =
+-- 37975 Hz (38 kHz - 0.07 %), on for 60 cycles (5 µs, 19 %): the TFDU4101's LED may
+-- take its repetitive pulse current only at a duty cycle below 20 % (datasheet,
+-- absolute maximum ratings), and a TXD pulse up to 23 µs comes out as light of the same
+-- length. The envelope holds 600 cycles (50 µs, about two carrier periods).
+def IrCfg.board : IrCfg := IrCfg.mk 6750 316 60 600
+-- For simulations: everything 25 times faster, the carrier 20 times.
+def IrCfg.fast : IrCfg := IrCfg.mk 270 16 3 40
+
+------------------------------------------------------------------------------------
+-- The specification, on numbers.
+
+def Lg.addr : Nat := 4        -- LG TVs: NEC address 0x04
+def Lg.power : Nat := 8       -- 0x08, POWER (toggle)
+def Lg.on : Nat := 196        -- 0xC4, POWER ON (discrete)
+def Lg.off : Nat := 197       -- 0xC5, POWER OFF (discrete)
+
+-- the 32 bits of a frame as a number (bit i is sent i-th): extended (two address
+-- bytes) and standard NEC
+def Nec.wordX (a0 a1 c : Nat) : Nat := a0 + a1 * 256 + c * 65536 + (255 - c) * 16777216
+def Nec.word (a c : Nat) : Nat := Nec.wordX a (255 - a) c
+
+-- the bits reversed: the first bit sent is the most significant. This is how LIRC,
+-- IRremote, IRDB's converters and most web pages write NEC codes ("0x20DF10EF").
+def Nec.revGo : Nat → Nat → Nat → Nat
+  | .zero, w, acc => acc
+  | .succ k, w, acc => Nec.revGo k (Nat.div w 2) (acc * 2 + Nat.mod w 2)
+def Nec.scancode (w : Nat) : Nat := Nec.revGo 32 w 0
+
+-- the frame as alternating mark and space lengths in units, starting with a mark
+def Nec.bitRuns : Nat → Nat → List Nat
+  | .zero, w => .cons 1 .nil
+  | .succ k, w => .cons 1 (.cons (1 + 2 * Nat.mod w 2) (Nec.bitRuns k (Nat.div w 2)))
+def Nec.runs (w : Nat) : List Nat := .cons 16 (.cons 8 (Nec.bitRuns 32 w))
+
+------------------------------------------------------------------------------------
+-- The frame in hardware: the bytes, and the same bits reversed (wires only).
+
+def necWordX {r : HwTy → Type} [Hw r] (a0 a1 c : r B8) : r B32 := Hw.cat (Hw.not c) (Hw.cat c (Hw.cat a1 a0))
+
+-- bits i … i+k-1 of x, reversed: bit i on top
+def revBits {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) : (ω k : Nat) → (ω i : Nat) → r (HwTy.bits k)
+  | .zero, i => Hw.lit 0 0
+  | .succ k, i => Hw.cat (Hw.slice i 1 x) (revBits x k (Nat.succ i))
+def scan32 {r : HwTy → Type} [Hw r] (w : r B32) : r B32 := revBits w 32 0
+
+------------------------------------------------------------------------------------
+-- A counter modulo `n` at width `w`: the next value, and whether this is its last
+-- cycle. (`Icestick.Proofs.Ir`: the unit counter and the carrier have the periods they
+-- should.)
+
+def modStep {r : HwTy → Type} [Hw r] (n : Nat) {ω w : Nat} (c : r (HwTy.bits w)) : r (HwTy.prod (HwTy.bits w) Bit) :=
+  let e := eqLit c (n - 1);
+  Hw.pair (Hw.mux e (Hw.lit w 0) (inc c)) e
+
+------------------------------------------------------------------------------------
+-- The encoder. A frame is 68 segments: 0 the leader mark, 1 the leader space, 2 + 2i
+-- the mark of bit i, 3 + 2i its space, 66 the final mark, 67 a gap of 40 units (22.5 ms,
+-- so that frames are at least that far apart). Even segments are marks.
+--
+-- State: the segment, the units left in it, the cycle in the unit, the cycle in the
+-- carrier period, busy, and the TXD pin (a register of its own). `start` is taken when
+-- idle; the bits come from `w`, which must stay the same until the frame is sent (in
+-- the blaster it is the register that holds the frame for the answer, so the encoder
+-- keeps no copy: the iCE40HX1K has 1280 logic cells).
+
+structure NecTx (r : HwTy → Type) where
+  seg : r B7
+  left : r B6
+  ucnt : r B13
+  car : r B9w
+  busy : r Bit
+  out : r Bit
+  deriving Bundle
+
+def NecTx.init : NecTx HwTy.El := NecTx.mk (BitVec.ofNat 7 0) (BitVec.ofNat 6 0) (BitVec.ofNat 13 0)
+  (BitVec.ofNat 9 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
+
+def Nec.gapUnits : Nat := 40
+
+-- the length of segment `k` in units, `b` the bit it belongs to (for a bit's space)
+def necLen {r : HwTy → Type} [Hw r] (k : r B7) (b : r Bit) : r B6 :=
+  let odd := Hw.slice 0 1 k;
+  Hw.mux (eqLit k 0) (Hw.lit 6 16) (Hw.mux (eqLit k 1) (Hw.lit 6 8) (Hw.mux (eqLit k 67) (Hw.lit 6 Nec.gapUnits)
+    (Hw.mux (band odd b) (Hw.lit 6 3) (Hw.lit 6 1))))
+
+def shr32 {r : HwTy → Type} [Hw r] (x : r B32) (b : r Bit) : r B32 := Hw.cat b (Hw.slice 1 31 x)
+
+-- bit `i` of `w` (a multiplexer)
+def bitAt {r : HwTy → Type} [Hw r] (w : r B32) (i : r B6) : Nat → r Bit
+  | .zero => Hw.slice 0 1 w
+  | .succ k => Hw.mux (eqLit i (Nat.succ k)) (Hw.slice (Nat.succ k) 1 w) (bitAt w i k)
+
+def necTxStep {r : HwTy → Type} [Hw r] (cfg : IrCfg) (s : NecTx r) (start : r Bit) (w : r B32) : r NecTx.code :=
+  let go := band start (bnot s.busy);
+  let u := modStep cfg.unit s.ucnt;
+  let unitEnd := band s.busy (Hw.snd u);
+  let segEnd := band unitEnd (eqLit s.left 1);
+  let next := inc s.seg;
+  -- entering segment 3 + 2i, the space of bit i: i is seg / 2 - 1
+  let bit := bitAt w (dec (Hw.slice 1 6 s.seg)) 31;
+  let c := modStep cfg.carP s.car;
+  let mark := band s.busy (bnot (Hw.slice 0 1 s.seg));
+  NecTx.pack (NecTx.mk
+    (Hw.mux go (Hw.lit 7 0) (Hw.mux segEnd next s.seg))
+    (Hw.mux go (Hw.lit 6 16) (Hw.mux segEnd (necLen next bit) (Hw.mux unitEnd (dec s.left) s.left)))
+    (Hw.mux (bor go (bnot s.busy)) (Hw.lit 13 0) (Hw.fst u))
+    (Hw.mux (bor go segEnd) (Hw.lit 9 0) (Hw.fst c))
+    (Hw.mux go hi (Hw.mux (band segEnd (eqLit s.seg 67)) lo s.busy))
+    (band mark (Hw.ult s.car (Hw.lit 9 cfg.carOn))))
+
+-- the encoder alone: input (start, word: held), output the TXD pin
+structure NecSend (r : HwTy → Type) where
+  start : r Bit
+  word : r B32
+  deriving Bundle
+structure IrLine (r : HwTy → Type) where
+  ir_tx : r Bit
+  busy : r Bit
+  deriving Bundle
+
+def necTxC (cfg : IrCfg) : Circuit NecSend.code IrLine.code :=
+  Circuit.bundled NecTx.bundle NecSend.bundle IrLine.bundle NecTx.init
+    (fun s x => Hw.pair (necTxStep cfg s x.start x.word) (IrLine.pack (IrLine.mk s.out s.busy)))
+
+------------------------------------------------------------------------------------
+-- The decoder. The TFDU4101's RXD goes low for about 2 µs at each rising edge of the
+-- light it sees (also, by design, at each pulse it sends itself: "echo"). A mark is
+-- light seen within the last `hold` cycles (the envelope). The decoder measures how long
+-- each level of the envelope lasts and decides at its edges: a mark of 12 units or more
+-- is a leader; after a leader a space of 6 or more starts a frame, of 3 to 6 is a repeat
+-- code; in a frame a space of 2 units or more is a one. The hold lengthens marks and
+-- shortens spaces by up to `hold` cycles; the thresholds are in the middle.
+--
+-- Phases: 0 waiting for a leader, 1 after a leader mark, 2 in the bits. A level that
+-- lasts 20 units ends everything (back to 0).
+
+structure NecRx (r : HwTy → Type) where
+  sync : Sync r
+  env : r B10
+  lvl : r Bit
+  dur : r B18
+  ge2 : r Bit
+  ge3 : r Bit
+  ge6 : r Bit
+  ge12 : r Bit
+  ph : r B2
+  n : r B6
+  deriving Bundle
+
+def NecRx.init : NecRx HwTy.El := NecRx.mk Sync.init (BitVec.ofNat 10 0) (BitVec.ofNat 1 0) (BitVec.ofNat 18 0)
+  (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 2 0) (BitVec.ofNat 6 0)
+
+-- What the decoder reports, each for one cycle: a bit of a frame (`bitv`, its value and
+-- its index), a whole frame (with its last bit), a repeat code. The decoder keeps no
+-- copy of the bits: the blaster shifts them into the register it prints from, and
+-- compares them one by one with the frame it sent.
+structure NecBit (r : HwTy → Type) where
+  frame : r Bit
+  rpt : r Bit
+  bitv : r Bit
+  val : r Bit
+  idx : r B6
+  deriving Bundle
+
+-- `dur ≥ k` as a flag of its own (a comparison with a carry chain costs a logic cell
+-- per bit): set in the cycle the count reaches `k`, cleared at an edge
+def geNext {r : HwTy → Type} [Hw r] (edge : r Bit) (d : r B18) (k : Nat) (f : r Bit) : r Bit :=
+  Hw.mux edge lo (bor f (eqLit d (k - 1)))
+
+def necRxStep {r : HwTy → Type} [Hw r] (cfg : IrCfg) (s : NecRx r) (rxd : r Bit) : r (HwTy.prod NecRx.code NecBit.code) :=
+  let light := bnot s.sync.ff2;
+  let inMark := bnot (eqLit s.env 0);
+  let rise := band inMark (bnot s.lvl);
+  let fall := band (bnot inMark) s.lvl;
+  let edge := bor rise fall;
+  let tout := eqLit s.dur (20 * cfg.unit);
+  let leader := band fall s.ge12;
+  let in1 := band rise (eqLit s.ph 1);
+  let in2 := band rise (eqLit s.ph 2);
+  let frameSpace := s.ge6;
+  let done := band in2 (eqLit s.n 31);
+  let badMark := band fall (band (eqLit s.ph 2) s.ge2);
+  Hw.pair
+    (NecRx.pack (NecRx.mk (Sync.unpack (syncStep s.sync rxd))
+      (Hw.mux light (Hw.lit 10 cfg.hold) (Hw.mux inMark (dec s.env) s.env))
+      inMark
+      (Hw.mux edge (Hw.lit 18 0) (Hw.mux tout s.dur (inc s.dur)))
+      (geNext edge s.dur (2 * cfg.unit) s.ge2) (geNext edge s.dur (3 * cfg.unit) s.ge3)
+      (geNext edge s.dur (6 * cfg.unit) s.ge6) (geNext edge s.dur (12 * cfg.unit) s.ge12)
+      (Hw.mux leader (Hw.lit 2 1) (Hw.mux in1 (Hw.mux frameSpace (Hw.lit 2 2) (Hw.lit 2 0))
+        (Hw.mux (bor done (bor badMark tout)) (Hw.lit 2 0) s.ph)))
+      (Hw.mux in1 (Hw.lit 6 0) (Hw.mux in2 (inc s.n) s.n))))
+    (NecBit.pack (NecBit.mk done (band in1 (band s.ge3 (bnot frameSpace))) in2 s.ge2 s.n))
+
+-- The decoder alone, with a shift register for the bits: input the RXD pin, output a
+-- frame (for one cycle, with its 32 bits) or a repeat code.
+structure IrIn (r : HwTy → Type) where
+  ir_rx : r Bit
+  deriving Bundle
+structure NecGot (r : HwTy → Type) where
+  frame : r Bit
+  rpt : r Bit
+  word : r B32
+  deriving Bundle
+structure NecRxW (r : HwTy → Type) where
+  dec : NecRx r
+  bits : r B32
+  deriving Bundle
+
+def necRxC (cfg : IrCfg) : Circuit IrIn.code NecGot.code :=
+  Circuit.bundled NecRxW.bundle IrIn.bundle NecGot.bundle (NecRxW.mk NecRx.init (BitVec.ofNat 32 0))
+    (fun s x =>
+      let dr := necRxStep cfg s.dec x.ir_rx;
+      let b := NecBit.unpack (Hw.snd dr);
+      let w := shr32 s.bits b.val;
+      Hw.pair (NecRxW.pack (NecRxW.mk (NecRx.unpack (Hw.fst dr)) (Hw.mux b.bitv w s.bits)))
+        (NecGot.pack (NecGot.mk b.frame b.rpt w)))

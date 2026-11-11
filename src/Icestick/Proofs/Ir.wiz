@@ -1,0 +1,87 @@
+import Icestick.Proofs
+import Icestick.Ir
+-- What is proved about the IR encoder, about the very functions that are synthesised
+-- (`necWordX`, `scan32`, `necLen`, `modStep`), at values. The kernel checks each
+-- statement by running them.
+
+------------------------------------------------------------------------------------
+-- 1. The frame's bits. The hardware puts address, complement, command and complement
+--    in that order; for every command byte at LG's address that is the specification's
+--    word, and the three LG codes are the ones published (as NEC codes are usually
+--    written: the first bit sent on top).
+
+def IrP.word (a0 a1 c : Nat) : Nat :=
+  BitVec.toNat (@necWordX HwTy.El _ (BitVec.ofNat 8 a0) (BitVec.ofNat 8 a1) (BitVec.ofNat 8 c))
+def IrP.scan (a0 a1 c : Nat) : Nat :=
+  BitVec.toNat (@scan32 HwTy.El _ (@necWordX HwTy.El _ (BitVec.ofNat 8 a0) (BitVec.ofNat 8 a1) (BitVec.ofNat 8 c)))
+
+-- 0x20DF10EF, 0x20DF23DC, 0x20DFA35C
+def IrP.lg_power : IrP.scan Lg.addr (255 - Lg.addr) Lg.power = 551489775 := refl 551489775
+def IrP.lg_on : IrP.scan Lg.addr (255 - Lg.addr) Lg.on = 551494620 := refl 551494620
+def IrP.lg_off : IrP.scan Lg.addr (255 - Lg.addr) Lg.off = 551527260 := refl 551527260
+-- the specification agrees
+def IrP.spec_power : Nec.scancode (Nec.word Lg.addr Lg.power) = 551489775 := refl 551489775
+def IrP.spec_on : Nec.scancode (Nec.word Lg.addr Lg.on) = 551494620 := refl 551494620
+def IrP.spec_off : Nec.scancode (Nec.word Lg.addr Lg.off) = 551527260 := refl 551527260
+
+def IrP.cmdOk (a c : Nat) : Bool := Bool.and (Nat.beq (IrP.word a (255 - a) c) (Nec.word a c))
+  (Nat.beq (IrP.scan a (255 - a) c) (Nec.scancode (Nec.word a c)))
+def IrP.lg_all : allBelow 256 (IrP.cmdOk Lg.addr) = .true := refl Bool.true
+-- so for each command byte `c`
+def IrP.lg_cmd (c : Nat) (h : Nat.lt c 256 = .true) : IrP.cmdOk Lg.addr c = .true :=
+  allBelow_spec c 256 (IrP.cmdOk Lg.addr) IrP.lg_all h
+
+------------------------------------------------------------------------------------
+-- 2. The segments. `necLen` gives each of the 68 segments its length in units, the
+--    space of a bit by the bit: along a frame that is the specification's runs, and
+--    the gap.
+
+def Nec.segLen (k b : Nat) : Nat := match Nat.beq k 0, Nat.beq k 1, Nat.beq k 67 with
+  | .true, _, _ => 16
+  | _, .true, _ => 8
+  | _, _, .true => Nec.gapUnits
+  | _, _, _ => match Nat.isOdd k with
+    | .true => 1 + 2 * b
+    | .false => 1
+
+def IrP.len (k b : Nat) : Nat := BitVec.toNat (@necLen HwTy.El _ (BitVec.ofNat 7 k) (BitVec.ofNat 1 b))
+def IrP.lenOk (k : Nat) : Bool := Bool.and (Nat.beq (IrP.len k 0) (Nec.segLen k 0)) (Nat.beq (IrP.len k 1) (Nec.segLen k 1))
+def IrP.lens : allBelow 68 IrP.lenOk = .true := refl Bool.true
+
+-- segments k … 67 of the frame `w` as the hardware times them (bit (k - 3) / 2 for a space)
+def IrP.segsGo (w : Nat) : Nat → Nat → List Nat
+  | .zero, k => .nil
+  | .succ n, k => .cons (IrP.len k (Nat.mod (Nat.div w (Nat.pow 2 (Nat.div (k - 3) 2))) 2)) (IrP.segsGo w n (k + 1))
+def IrP.segs (w : Nat) : List Nat := IrP.segsGo w 68 0
+def IrP.runs (w : Nat) : List Nat := List.append (Nec.runs w) (.cons Nec.gapUnits .nil)
+
+def IrP.segs_power : IrP.segs (Nec.word Lg.addr Lg.power) = IrP.runs (Nec.word Lg.addr Lg.power) := refl (IrP.runs (Nec.word Lg.addr Lg.power))
+def IrP.segs_on : IrP.segs (Nec.word Lg.addr Lg.on) = IrP.runs (Nec.word Lg.addr Lg.on) := refl (IrP.runs (Nec.word Lg.addr Lg.on))
+def IrP.segs_off : IrP.segs (Nec.word Lg.addr Lg.off) = IrP.runs (Nec.word Lg.addr Lg.off) := refl (IrP.runs (Nec.word Lg.addr Lg.off))
+
+------------------------------------------------------------------------------------
+-- 3. The counters. The carrier counter (`modStep 316` at 9 bits) comes back to 0 after
+--    316 cycles, and of those the LED is on in the first 60 (the comparison the encoder
+--    makes): 37975 Hz, 19 %. The unit counter (`modStep 6750` at 13 bits) ends a unit
+--    exactly once in 6750 cycles, in the last: 562.5 µs. (With `rounds_fixed`, as for
+--    the baud divider, that holds for every period after the first.)
+
+def IrP.carNext (c : BitVec 9) : BitVec 9 := (@modStep HwTy.El _ (IrCfg.carP IrCfg.board) 9 c).1
+def IrP.carLed (c : BitVec 9) : Nat := BitVec.toNat (@Hw.ult HwTy.El _ 9 c (BitVec.ofNat 9 (IrCfg.carOn IrCfg.board)))
+def IrP.carGo : Nat → BitVec 9 → List Nat
+  | .zero, c => .nil
+  | .succ k, c => .cons (IrP.carLed c) (IrP.carGo k (IrP.carNext c))
+def IrP.carPattern : List Nat := Wave.rep 60 1 (Wave.rep 256 0 .nil)
+
+def IrP.car_returns : iter IrP.carNext 316 (BitVec.ofNat 9 0) = BitVec.ofNat 9 0 := refl (BitVec.ofNat 9 0)
+def IrP.car_duty : IrP.carGo 316 (BitVec.ofNat 9 0) = IrP.carPattern := refl IrP.carPattern
+
+def IrP.unitNext (c : BitVec 13) : BitVec 13 := (@modStep HwTy.El _ (IrCfg.unit IrCfg.board) 13 c).1
+def IrP.unitEnd (c : BitVec 13) : Nat := BitVec.toNat (@modStep HwTy.El _ (IrCfg.unit IrCfg.board) 13 c).2
+def IrP.unitGo : Nat → BitVec 13 → List Nat
+  | .zero, c => .nil
+  | .succ k, c => .cons (IrP.unitEnd c) (IrP.unitGo k (IrP.unitNext c))
+def IrP.unitPattern : List Nat := Wave.rep 6749 0 (.cons 1 .nil)
+
+def IrP.unit_returns : iter IrP.unitNext 6750 (BitVec.ofNat 13 0) = BitVec.ofNat 13 0 := refl (BitVec.ofNat 13 0)
+def IrP.unit_once : IrP.unitGo 6750 (BitVec.ofNat 13 0) = IrP.unitPattern := refl IrP.unitPattern

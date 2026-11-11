@@ -1,0 +1,180 @@
+import Icestick.Blaster
+import Icestick.Wave
+-- The IR blaster in simulation: the transceiver as the design sees it, a remote
+-- control, and an analyser that turns what the design puts on the TXD pin back into
+-- carrier pulses, marks and NEC frames.
+
+------------------------------------------------------------------------------------
+-- The TFDU4101 seen from the FPGA: its RXD pin goes low for `pw` cycles at each rising
+-- edge of the light it sees (2.2 µs typ.: 26 cycles at 12 MHz). The light is the
+-- board's own TXD (the echo; one cycle late) or a remote control's.
+--
+-- `IrSim.run c pw uart remote cycles` runs the design for `cycles` cycles with the RX pin
+-- of the serial port and the remote's light given cycle by cycle (both padded: idle
+-- high, dark), and returns the input leaves of every cycle (`uart_rx`, `ir_rx`, as the
+-- netlist's ports) and the output leaves (`uart_tx`, `leds`, `ir_tx`, `ir_sd`).
+
+def IrSim.headD (d : Nat) : List Nat → Nat
+  | .nil => d
+  | .cons x xs => x
+def IrSim.tail : List Nat → List Nat
+  | .nil => .nil
+  | .cons x xs => xs
+
+def IrSim.go (c : Circuit IrPins.code IrBoard.code) (pw : Nat) :
+    Nat → HwTy.El c.st → Nat → Nat → Nat → List Nat → List Nat → List (List Nat) → List (List Nat) → List (List Nat) × List (List Nat)
+  | .zero, s, tx, prev, left, uart, remote, ins, outs => (Hdl.reverse ins, Hdl.reverse outs)
+  | .succ k, s, tx, prev, left, uart, remote, ins, outs =>
+    -- the light: the board's TXD of the last cycle, or the remote's
+    let ω light := Nat.max tx (IrSim.headD 0 remote);
+    let ω left2 := (match Bool.and (Nat.beq light 1) (Nat.beq prev 0) with
+      | .true => pw
+      | .false => left - 1);
+    let ω rxd := (match Nat.beq left2 0 with
+      | .true => 1
+      | .false => 0);
+    let ω u := IrSim.headD 1 uart;
+    let ω x : HwTy.El IrPins.code := Bundle.toEl IrPins.bundle (IrPins.mk (BitVec.ofNat 1 u) (BitVec.ofNat 1 rxd));
+    let ω r : HwTy.El c.st × HwTy.El IrBoard.code := Circuit.stepEl c s x;
+    let ω o : IrBoard HwTy.El := Bundle.ofEl IrBoard.bundle r.2;
+    IrSim.go c pw k r.1 (BitVec.toNat o.ir_tx) light left2 (IrSim.tail uart) (IrSim.tail remote)
+      (.cons (.cons u (.cons rxd .nil)) ins) (.cons (HwTy.leaves IrBoard.code r.2) outs)
+
+def IrSim.run (c : Circuit IrPins.code IrBoard.code) (pw : Nat) (uart remote : List Nat) (cycles : Nat) :
+    List (List Nat) × List (List Nat) :=
+  IrSim.go c pw cycles c.init 0 0 0 uart remote .nil .nil
+
+def IrSim.port (k : Nat) (outs : List (List Nat)) : List Nat := Hdl.map (fun (y : List Nat) => Hdl.nthD 0 y k) outs
+def IrSim.uartTx (outs : List (List Nat)) : List Nat := IrSim.port 0 outs
+def IrSim.leds (outs : List (List Nat)) : List Nat := IrSim.port 1 outs
+def IrSim.irTx (outs : List (List Nat)) : List Nat := IrSim.port 2 outs
+
+------------------------------------------------------------------------------------
+-- A remote control: NEC runs (in units, a mark first) as light, with its own carrier:
+-- on for the first `carOn` cycles of each period of `carP`.
+
+def Remote.seg (lvl carP carOn : Nat) : Nat → Nat → List Nat → List Nat
+  | .zero, t, acc => acc
+  | .succ n, t, acc => Remote.seg lvl carP carOn n (t + 1)
+      (.cons (lvl * Nat.ofBool (Nat.lt (Nat.mod t carP) carOn)) acc)
+
+def Remote.go (unit carP carOn : Nat) : Nat → List Nat → List Nat → List Nat
+  | lvl, .nil, acc => acc
+  | lvl, .cons k ks, acc => Remote.go unit carP carOn (1 - lvl) ks (Remote.seg lvl carP carOn (k * unit) 0 acc)
+
+-- `before` dark cycles, then the runs
+def Remote.light (unit carP carOn before : Nat) (runs : List Nat) : List Nat :=
+  Hdl.reverse (Remote.go unit carP carOn 1 runs (Wave.rep before 0 .nil))
+
+def Nec.repeatRuns : List Nat := .cons 16 (.cons 4 (.cons 1 .nil))
+
+------------------------------------------------------------------------------------
+-- The analyser. Pulses (runs of ones: start and length), marks (pulses closer than a
+-- carrier period and a bit: start and end), frames (a mark of 12 units or more starts
+-- one), and each frame as NEC runs in units.
+
+def Ana.highs : Nat → Nat → Bool → List Nat → List (Nat × Nat) → List (Nat × Nat)
+  | t, st, h, .nil, acc => Hdl.reverse (match h with
+    | .true => .cons (st, t - st) acc
+    | .false => acc)
+  | t, st, .false, .cons v vs, acc => (match Nat.beq v 1 with
+    | .true => Ana.highs (t + 1) t .true vs acc
+    | .false => Ana.highs (t + 1) st .false vs acc)
+  | t, st, .true, .cons v vs, acc => match Nat.beq v 1 with
+    | .true => Ana.highs (t + 1) st .true vs acc
+    | .false => Ana.highs (t + 1) st .false vs (.cons (st, t - st) acc)
+def Ana.pulses (xs : List Nat) : List (Nat × Nat) := Ana.highs 0 0 .false xs .nil
+
+-- pulses with a gap of at most `gap` belong to one mark
+def Ana.marksGo (gap : Nat) : List (Nat × Nat) → Nat → Nat → List (Nat × Nat) → List (Nat × Nat)
+  | .nil, st, en, acc => Hdl.reverse (.cons (st, en) acc)
+  | .cons p ps, st, en, acc => match Nat.le p.1 (en + gap) with
+    | .true => Ana.marksGo gap ps st (p.1 + p.2) acc
+    | .false => Ana.marksGo gap ps p.1 (p.1 + p.2) (.cons (st, en) acc)
+def Ana.marks (gap : Nat) : List (Nat × Nat) → List (Nat × Nat)
+  | .nil => .nil
+  | .cons p ps => Ana.marksGo gap ps p.1 (p.1 + p.2) .nil
+
+-- the carrier: how many pulses are `carOn` long, and how many of the pulses that follow
+-- another one within a period and a bit start exactly `carP` after it
+def Ana.widthsOk (carOn : Nat) : List (Nat × Nat) → Nat → Nat
+  | .nil, acc => acc
+  | .cons p ps, acc => Ana.widthsOk carOn ps (acc + Nat.ofBool (Nat.beq p.2 carOn))
+def Ana.periods (carP : Nat) : List (Nat × Nat) → Nat → Nat → Nat → Nat × Nat
+  | .nil, prev, ok, all => (ok, all)
+  | .cons p ps, prev, ok, all => match Bool.and (Nat.lt 0 prev) (Nat.le p.1 (prev + carP + Nat.div carP 2)) with
+    | .true => Ana.periods carP ps p.1 (ok + Nat.ofBool (Nat.beq (p.1 - prev) carP)) (all + 1)
+    | .false => Ana.periods carP ps p.1 ok all
+
+-- A frame from its marks: the runs in units (a mark is rounded up: its last carrier
+-- pulse ends before the unit does; a mark plus the space after it must be a whole
+-- number of units, `exact` says whether they all are).
+structure Frame where
+  start : Nat
+  runs : List Nat
+  exact : Bool
+
+def Ana.runsGo (unit : Nat) : List (Nat × Nat) → List Nat → Bool → List Nat × Bool
+  | .nil, acc, ex => (Hdl.reverse acc, ex)
+  | .cons m rest, acc, ex =>
+    let ω mk := Wave.ceilDiv (m.2 - m.1) unit;
+    match rest with
+    | .nil => (Hdl.reverse (.cons mk acc), ex)
+    | .cons m2 _ =>
+      Ana.runsGo unit rest (.cons (Nat.div (m2.1 - m.1) unit - mk) (.cons mk acc))
+        (Bool.and ex (Nat.beq (Nat.mod (m2.1 - m.1) unit) 0))
+
+def Ana.isLeader (unit : Nat) (m : Nat × Nat) : Bool := Nat.le (12 * unit) (m.2 - m.1 + unit)
+
+-- split the marks into frames, each starting with a leader
+def Ana.framesGo (unit : Nat) : List (Nat × Nat) → List (Nat × Nat) → List (List (Nat × Nat)) → List (List (Nat × Nat))
+  | .nil, cur, acc => Hdl.reverse (match cur with
+    | .nil => acc
+    | .cons _ _ => .cons (Hdl.reverse cur) acc)
+  | .cons m ms, cur, acc => match Ana.isLeader unit m, cur with
+    | .true, .nil => Ana.framesGo unit ms (.cons m .nil) acc
+    | .true, .cons _ _ => Ana.framesGo unit ms (.cons m .nil) (.cons (Hdl.reverse cur) acc)
+    | .false, _ => Ana.framesGo unit ms (.cons m cur) acc
+
+def Ana.frameOf (unit : Nat) (ms : List (Nat × Nat)) : Frame :=
+  let ω r := Ana.runsGo unit ms .nil .true;
+  Frame.mk (match ms with
+    | .nil => 0
+    | .cons m _ => m.1) r.1 r.2
+
+def Ana.framesOf (unit : Nat) : List (List (Nat × Nat)) → List Frame
+  | .nil => .nil
+  | .cons f fs => .cons (Ana.frameOf unit f) (Ana.framesOf unit fs)
+
+def Ana.frames (cfg : IrCfg) (tx : List Nat) : List Frame :=
+  Ana.framesOf (IrCfg.unit cfg) (Ana.framesGo (IrCfg.unit cfg) (Ana.marks ((IrCfg.carP cfg) + 1) (Ana.pulses tx)) .nil .nil)
+
+-- the 32 bits of NEC runs (the spaces after the bit marks); `none` if the runs are not
+-- a frame
+def Ana.bitsGo : Nat → List Nat → Nat → Nat → Option Nat
+  | .zero, .cons m .nil, p, acc => (match Nat.beq m 1 with
+    | .true => .some acc
+    | .false => .none)
+  | .succ k, .cons m (.cons sp rest), p, acc => (match Nat.beq m 1, Nat.beq sp 1, Nat.beq sp 3 with
+    | .true, .true, _ => Ana.bitsGo k rest (2 * p) acc
+    | .true, _, .true => Ana.bitsGo k rest (2 * p) (acc + p)
+    | _, _, _ => .none)
+  | _, _, _, _ => .none
+def Ana.word (runs : List Nat) : Option Nat := match runs with
+  | .cons a (.cons b rest) => (match Nat.beq a 16, Nat.beq b 8 with
+    | .true, .true => Ana.bitsGo 32 rest 1 0
+    | _, _ => .none)
+  | _ => .none
+
+------------------------------------------------------------------------------------
+-- Text: the bytes of a frame in the order sent and its code, as the board writes them.
+
+def Spec.hex2 (b : Nat) (rest : List Nat) : List Nat := .cons (Crc.hex (Nat.div b 16)) (.cons (Crc.hex (Nat.mod b 16)) rest)
+def Spec.hex8 (w : Nat) (rest : List Nat) : List Nat :=
+  Spec.hex2 (Nat.div w 16777216) (Spec.hex2 (Nat.mod (Nat.div w 65536) 256)
+    (Spec.hex2 (Nat.mod (Nat.div w 256) 256) (Spec.hex2 (Nat.mod w 256) rest)))
+def Spec.byte (w k : Nat) : Nat := Nat.mod (Nat.div w (Nat.pow 256 k)) 256
+-- "04 FB C4 3B (20DF23DC)"
+def Spec.frame (w : Nat) (rest : List Nat) : List Nat :=
+  Spec.hex2 (Spec.byte w 0) (.cons 32 (Spec.hex2 (Spec.byte w 1) (.cons 32 (Spec.hex2 (Spec.byte w 2)
+    (.cons 32 (Spec.hex2 (Spec.byte w 3) (.cons 32 (.cons 40 (Spec.hex8 (Nec.scancode w) (.cons 41 rest))))))))))

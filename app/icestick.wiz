@@ -3,11 +3,11 @@ import Sys
 -- The flow driver: `icestick COMMAND`. grail builds this program (and checks the
 -- library); it writes the Verilog and runs the FPGA tools as child processes.
 --
---   gen            write build/*.v, the pin constraints, test benches and traces,
+--   gen [NAME…]    write build/*.v, the pin constraints, test benches and traces,
 --                  after simulating every design (values and netlist) and checking
 --                  the bytes it sends
 --   sim            gen, then replay the traces on the Verilog with Icarus Verilog
---   bit            synthesise, place and route, pack; timing report
+--   bit [NAME…]    synthesise, place and route, pack; timing report
 --   postsim        replay the traces on the synthesised netlists
 --   all            gen, sim, bit, postsim
 --   flash NAME     write build/NAME.bin to the board (iceprog)
@@ -16,6 +16,8 @@ import Sys
 --                  lines (default 200), each answer within TENTHS/10 s (default 20)
 --   fake PORT      be a board running `proto` on a (pseudo) terminal: the same
 --                  circuit, simulated cycle by cycle
+--   irtest [PORT]  talk to a board running `ir`: send `on` and `power` at its prompt
+--                  and check each answer (the frame, and that it came back)
 
 ------------------------------------------------------------------------------------
 -- Text (String.chars, String.eq, String.contains, List.take are the library's)
@@ -94,33 +96,45 @@ def check (what : String) (ok : Bool) : EIO Unit := match ok with
 
 def genDesign (d : Design) : EIO Unit := do
   let name := d.name;
-  let xs := Top.input name;
-  let ins := Hdl.map (fun (b : Nat) => List.cons b List.nil) xs;
+  let ins := Top.inputLeaves name;
   let net := Design.netlist d;
   say (name <+> ": " <+> Hdl.show (Netlist.size net) <+> " netlist nodes, "
-    <+> Hdl.show (List.length net.regs) <+> " registers, " <+> Hdl.show (List.length xs) <+> " cycles");
-  let ys := Design.runLeaves d ins;
-  -- the first output port is `uart_tx`
-  let got := Wave.decode clocksPerBit 1 (Hdl.map (fun (y : List Nat) => Hdl.nthD 0 y 0) ys);
-  check ("value simulation sends the expected " <+> Hdl.show (List.length (Top.expect name)) <+> " bytes")
-    (Hdl.natsEq got (Top.expect name));
-  check ("netlist simulation = value simulation (all cycles)") (leavesEq (Netlist.simulate net ins) ys);
-  FS.writeFile (build (name <+> ".v")) (Verilog.emit net);
-  FS.writeFile (build (name <+> "_tb.v")) (Testbench.verilog net (build (name <+> ".vec")) (List.length xs));
-  FS.writeFile (build (name <+> ".vec")) "";
-  writeVec (build (name <+> ".vec")) (List.length xs) (Testbench.lines net ins ys)
-
-def gen : EIO Unit := do
-  ensureDir "build";
-  let net := Design.netlist (Circuit.design "proto" (proto clocksPerBit));
-  check "every port has its pins" (match Pcf.check net Board.pins with
+    <+> Hdl.show (List.length net.regs) <+> " registers, " <+> Hdl.show (List.length ins) <+> " cycles");
+  check "every port has its pin, every pin its port" (match Pcf.check net (Top.pins name) with
     | .nil => .true
     | _ => .false);
-  FS.writeFile (build "icestick.pcf") (Pcf.emit net Board.clk Board.pins);
+  FS.writeFile (build (name <+> ".pcf")) (Pcf.emit net Board.clk (Top.pins name));
+  let ys := Design.runLeaves d ins;
+  -- the first output port is `uart_tx`
+  let got := Wave.decode (Top.bitCycles name) 1 (Hdl.map (fun (y : List Nat) => Hdl.nthD 0 y 0) ys);
+  check ("value simulation sends the expected " <+> Hdl.show (List.length (Top.expectAll name)) <+> " bytes")
+    (Hdl.natsEq got (Top.expectAll name));
+  check ("netlist simulation = value simulation (all cycles)") (leavesEq (Netlist.simulate net ins) ys);
+  FS.writeFile (build (name <+> ".v")) (Verilog.emit net);
+  FS.writeFile (build (name <+> "_tb.v")) (Testbench.verilog net (build (name <+> ".vec")) (List.length ins));
+  FS.writeFile (build (name <+> ".vec")) "";
+  writeVec (build (name <+> ".vec")) (List.length ins) (Testbench.lines net ins ys)
+
+-- the designs named on the command line (all of them if none is)
+def Top.pickGo (names : List String) : List Design → List Design
+  | .nil => .nil
+  | .cons d ds => match Hdl.member d.name names with
+    | .true => .cons d (Top.pickGo names ds)
+    | .false => Top.pickGo names ds
+def Top.pick (names : List String) (ds : List Design) : List Design := match names with
+  | .nil => ds
+  | .cons _ _ => Top.pickGo names ds
+
+def genSome (names : List String) : EIO Unit := do
+  ensureDir "build";
+  check ("the IR blaster's messages (" <+> Hdl.show (List.length Msg.rom) <+> " codes) fit its 8-bit address")
+    (Nat.lt (List.length Msg.rom) 257);
   -- a waveform of the first reply of `proto` (every port and register)
   FS.writeFile (build "proto.vcd") (Vcd.ofRun "proto" (proto clocksPerBit)
     (Hdl.map (fun (b : Nat) => HwTy.unpack Pins.code b) (List.take 6000 (Top.input "proto"))));
-  EIO.forEach genDesign Top.designs
+  EIO.forEach genDesign (Top.pick names Top.designs)
+
+def gen : EIO Unit := genSome .nil
 
 -- replay a trace on Verilog sources with Icarus Verilog
 def replay (std label name : String) (sources : List String) : EIO Unit := do
@@ -141,11 +155,11 @@ def bitDesign (d : Design) : EIO Unit := do
       <+> "; write_verilog -noattr " <+> build (name <+> "_syn.v"))
     (.cons (build (name <+> ".v")) .nil))))));
   tool "nextpnr-ice40" (.cons "--hx1k" (.cons "--package" (.cons "tq144" (.cons "--freq" (.cons "12"
-    (.cons "--json" (.cons (build (name <+> ".json")) (.cons "--pcf" (.cons (build "icestick.pcf")
+    (.cons "--json" (.cons (build (name <+> ".json")) (.cons "--pcf" (.cons (build (name <+> ".pcf"))
     (.cons "--asc" (.cons (build (name <+> ".asc")) (.cons "--log" (.cons (build (name <+> ".nextpnr.log"))
     (.cons "-q" .nil))))))))))))));
   tool "icepack" (.cons (build (name <+> ".asc")) (.cons (build (name <+> ".bin")) .nil));
-  tool "icetime" (.cons "-d" (.cons "hx1k" (.cons "-P" (.cons "tq144" (.cons "-p" (.cons (build "icestick.pcf")
+  tool "icetime" (.cons "-d" (.cons "hx1k" (.cons "-P" (.cons "tq144" (.cons "-p" (.cons (build (name <+> ".pcf"))
     (.cons "-c" (.cons "12" (.cons "-m" (.cons "-t" (.cons "-r" (.cons (build (name <+> ".icetime.rpt"))
     (.cons (build (name <+> ".asc")) .nil)))))))))))))
 
@@ -256,18 +270,70 @@ def fake (port : String) : EIO Unit := do
   fakeLoop rd wr 1000000
 
 ------------------------------------------------------------------------------------
+-- The IR blaster on the board: send commands at its prompt, check the answers.
+
+-- read lines until one starts with `want` (at most `n` lines); what was read
+def readUntil (rd : File) (want : String) : Nat → String → EIO (Option String)
+  | .zero, seen => EIO.pure .none
+  | .succ n, seen => do
+    r ← File.readLine rd;
+    match r with
+    | .none => EIO.pure .none
+    | .some l => (match String.contains l want with
+      | .true => EIO.pure (.some l)
+      | .false => readUntil rd want n seen)
+
+def Chars.dropCr : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match Nat.beq (Char.code c) 13 with
+    | .true => Chars.dropCr cs
+    | .false => .cons c (Chars.dropCr cs)
+
+-- one command: what the board must answer
+def irCommand (rd wr : File) (cmd : String) (w : Nat) : EIO Bool := do
+  say ("> " <+> cmd);
+  File.write wr (String.ofCodes (List.append (Txt.codes cmd) (.cons 13 .nil)));
+  File.flush wr;
+  let want := String.ofCodes (List.append (Txt.codes "sent ") (Spec.frame w (Txt.codes ", echo ok")));
+  r ← readUntil rd "sent" 4 "";
+  match r with
+  | .none => do
+    say "  no answer";
+    EIO.pure .false
+  | .some l => do
+    let got := String.mk (Chars.dropCr (String.chars l));
+    say ("  " <+> got);
+    EIO.pure (String.eq got want)
+
+def irtest (port : String) : EIO Unit := do
+  setupPort port 30;
+  wr ← File.open port "w";
+  rd ← File.open port "r";
+  -- ^C: a fresh prompt whatever was typed before
+  File.write wr (String.ofCodes (.cons 3 .nil));
+  File.flush wr;
+  junk ← File.readLine rd;
+  ok1 ← irCommand rd wr "on" (Nec.word Lg.addr Lg.on);
+  ok2 ← irCommand rd wr "power" (Nec.word Lg.addr Lg.power);
+  File.close rd;
+  File.close wr;
+  match Bool.and ok1 ok2 with
+  | .true => say "PASS: both frames sent, and the transceiver's receiver decoded each one"
+  | .false => EIO.fail "FAIL: see above"
+
+------------------------------------------------------------------------------------
 
 def usage : String :=
-  "usage: icestick gen | sim | bit | postsim | all | flash NAME | test [PORT [LINES [TENTHS]]] | fake PORT"
+  "usage: icestick gen | sim | bit | postsim | all | flash NAME | test [PORT [LINES [TENTHS]]] | fake PORT | irtest [PORT]"
 
 def sim : EIO Unit := EIO.forEach simDesign Top.designs
 def bit : EIO Unit := EIO.forEach bitDesign Top.designs
 
 def run : List String → EIO Unit
   | .cons cmd rest => (match String.eq cmd "gen", String.eq cmd "sim", String.eq cmd "bit", String.eq cmd "postsim" with
-    | .true, _, _, _ => gen
+    | .true, _, _, _ => genSome rest
     | _, .true, _, _ => EIO.bind gen (fun u => sim)
-    | _, _, .true, _ => bit
+    | _, _, .true, _ => EIO.forEach bitDesign (Top.pick rest Top.designs)
     | _, _, _, .true => postsim
     | _, _, _, _ => match String.eq cmd "all", String.eq cmd "flash", String.eq cmd "test", String.eq cmd "fake" with
       | .true, _, _, _ => EIO.bind gen (fun u => EIO.bind sim (fun u => EIO.bind bit (fun u => postsim)))
@@ -282,7 +348,10 @@ def run : List String → EIO Unit
       | _, _, _, .true => (match rest with
         | .cons port _ => fake port
         | .nil => EIO.fail usage)
-      | _, _, _, _ => EIO.fail usage)
+      | _, _, _, _ => match String.eq cmd "irtest", rest with
+        | .true, .cons port _ => irtest port
+        | .true, .nil => irtest defaultPort
+        | .false, _ => EIO.fail usage)
   | .nil => EIO.fail usage
 
 def main : IO Unit := EIO.toIO (EIO.bind (EIO.lift IO.args) run)
