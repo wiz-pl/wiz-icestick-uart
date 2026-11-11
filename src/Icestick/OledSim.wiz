@@ -1,0 +1,395 @@
+import Icestick.Demo
+import Icestick.Wave
+-- The demo in simulation: the pins, the designs, a model of the SSD1306 that turns the
+-- pins' levels (cycle by cycle) into commands and frames, the frames the effects must
+-- give (the effect functions evaluated pixel by pixel), and PBM pictures.
+
+------------------------------------------------------------------------------------
+-- Pins. The board's (icestorm's examples/icestick/icestick.pcf: clk 21, RX 9, TX 8,
+-- LED1 … LED5 = 99 … 95) and the Pmod connector J2 (iCEstick pinout: J2 pins 1 … 4 =
+-- FPGA 78, 79, 80, 81; pins 7 … 10 = 87, 88, 90, 91; 5, 11 GND, 6, 12 3.3 V), as a
+-- Digilent PmodOLED expects them (its reference manual, J1: 1 CS, 2 SDIN, 3 unused,
+-- 4 SCLK, 7 D/C, 8 RES, 9 VBATC, 10 VDDC). Another module: change the numbers here.
+
+def Oled.pins : List Pin :=
+  .cons (Pin.one "uart_rx" 9) (.cons (Pin.one "uart_tx" 8)
+  (.cons (Pin.bus "leds" (.cons 99 (.cons 98 (.cons 97 (.cons 96 (.cons 95 .nil))))))
+  (.cons (Pin.one "oled_cs" 78)      -- J2 pin 1
+  (.cons (Pin.one "oled_mosi" 79)    -- J2 pin 2
+  (.cons (Pin.one "oled_sclk" 81)    -- J2 pin 4
+  (.cons (Pin.one "oled_dc" 87)      -- J2 pin 7
+  (.cons (Pin.one "oled_res" 88)     -- J2 pin 8
+  (.cons (Pin.one "oled_vbatc" 90)   -- J2 pin 9
+  (.cons (Pin.one "oled_vddc" 91)    -- J2 pin 10
+  .nil)))))))))
+def Oled.clk : Nat := 21
+
+-- the UART's bit: 104 cycles (115384.6 baud)
+def Oled.bit : Nat := 104
+
+------------------------------------------------------------------------------------
+-- The designs. `oled` is for the PmodOLED (128 × 32), `oled64` for a 128 × 64 module;
+-- the `_fast` ones are the same circuits with short waits and frames, for simulation.
+
+def Oled.fast32 : OledCfg := OledCfg.fast 32 50 197
+def Oled.fast64 : OledCfg := OledCfg.fast 64 1000 211
+
+def Oled.designs : List Design :=
+  .cons (Circuit.design "oled" (demo OledCfg.board32 Oled.bit))
+  (.cons (Circuit.design "oled64" (demo OledCfg.board Oled.bit))
+  (.cons (Circuit.design "oled_fast" (demo Oled.fast32 Oled.bit))
+  (.cons (Circuit.design "oled64_fast" (demo Oled.fast64 Oled.bit)) .nil)))
+
+def Oled.cfgOf (name : String) : OledCfg := match Hdl.strEq name "oled", Hdl.strEq name "oled64" with
+  | .true, _ => OledCfg.board32
+  | _, .true => OledCfg.board
+  | _, _ => match Hdl.strEq name "oled_fast" with
+    | .true => Oled.fast32
+    | .false => Oled.fast64
+
+------------------------------------------------------------------------------------
+-- The SSD1306, from its pins. The output leaves of a design, in `OledBoard`'s order:
+-- uart_tx, leds, cs, mosi, sclk, dc, res, vbatc, vddc.
+
+inductive SEv where
+  | byte (c dc b : Nat)        -- a byte complete at cycle c (D/C as sampled with its last bit)
+  | csHigh (c : Nat)           -- CS went high
+  | pin (c k v : Nat)          -- RES (k = 0), VBATC (1) or VDDC (2) changed to v
+
+structure Pins6 where
+  cs : Nat
+  mosi : Nat
+  sclk : Nat
+  dc : Nat
+  res : Nat
+  vbat : Nat
+  vdd : Nat
+
+def Pins6.of (y : List Nat) : Pins6 :=
+  Pins6.mk (Hdl.nthD 0 y 2) (Hdl.nthD 0 y 3) (Hdl.nthD 0 y 4) (Hdl.nthD 0 y 5)
+    (Hdl.nthD 0 y 6) (Hdl.nthD 0 y 7) (Hdl.nthD 0 y 8)
+
+def SEv.pinChanges (c : Nat) (p q : Pins6) (acc : List SEv) : List SEv :=
+  let a1 : List SEv := match Nat.beq p.res q.res with
+    | .true => acc
+    | .false => .cons (SEv.pin c 0 q.res) acc;
+  let a2 : List SEv := match Nat.beq p.vbat q.vbat with
+    | .true => a1
+    | .false => .cons (SEv.pin c 1 q.vbat) a1;
+  match Nat.beq p.vdd q.vdd with
+  | .true => a2
+  | .false => .cons (SEv.pin c 2 q.vdd) a2
+
+-- The serial interface: while CS is low and RES high, each rising edge of SCLK shifts
+-- SDIN in, most significant bit first; the eighth completes a byte (D/C is read with
+-- it). CS high resets the bit counter.
+def SEv.go : List (List Nat) → Nat → Pins6 → Nat → Nat → List SEv → List SEv
+  | .nil, c, p, n, acc, out => Hdl.reverse out
+  | .cons y ys, c, p, n, acc, out =>
+    let q := Pins6.of y;
+    let out1 := SEv.pinChanges c p q out;
+    match Nat.beq q.cs 1, Bool.and (Nat.beq p.sclk 0) (Bool.and (Nat.beq q.sclk 1) (Nat.beq q.res 1)) with
+    | .true, _ => SEv.go ys (c + 1) q 0 0 (match Nat.beq p.cs 0 with
+        | .true => .cons (SEv.csHigh c) out1
+        | .false => out1)
+    | .false, .true => (match Nat.beq n 7 with
+        | .true => SEv.go ys (c + 1) q 0 0 (.cons (SEv.byte c q.dc (acc * 2 + q.mosi)) out1)
+        | .false => SEv.go ys (c + 1) q (n + 1) (acc * 2 + q.mosi) out1)
+    | .false, .false => SEv.go ys (c + 1) q n acc out1
+
+def SEv.ofRun (ys : List (List Nat)) : List SEv :=
+  SEv.go ys 0 (Pins6.mk 1 0 0 0 1 1 1) 0 0 .nil
+
+-- The controller's registers that the demo sets (datasheet section 9), as a list of
+-- numbers (booleans as 0 and 1), by these indices:
+def R.on : Nat := 0
+def R.pump : Nat := 1        -- the byte after 8D
+def R.mux : Nat := 2
+def R.offset : Nat := 3
+def R.start : Nat := 4
+def R.mode : Nat := 5
+def R.remap : Nat := 6
+def R.comRev : Nat := 7
+def R.comPins : Nat := 8
+def R.contrast : Nat := 9
+def R.precharge : Nat := 10
+def R.vcomh : Nat := 11
+def R.clock : Nat := 12
+def R.inverse : Nat := 13
+def R.resume : Nat := 14
+def R.c0 : Nat := 15
+def R.c1 : Nat := 16
+def R.p0 : Nat := 17
+def R.p1 : Nat := 18
+def R.col : Nat := 19
+def R.page : Nat := 20
+
+def Ram.set : List Nat → Nat → Nat → List Nat
+  | .nil, k, v => .nil
+  | .cons x xs, k, v => match k with
+    | .zero => .cons v xs
+    | .succ j => .cons x (Ram.set xs j v)
+
+def R.get (s : List Nat) (k : Nat) : Nat := Hdl.nthD 0 s k
+def R.set (s : List Nat) (k v : Nat) : List Nat := Ram.set s k v
+def R.is (s : List Nat) (k v : Nat) : Bool := Nat.beq (R.get s k) v
+
+-- after reset (datasheet, command table, the reset values): display off, charge pump
+-- off, 64 rows, page addressing, the ranges the whole RAM
+def R.reset : List Nat :=
+  .cons 0 (.cons 16 (.cons 63 (.cons 0 (.cons 0 (.cons 2 (.cons 0 (.cons 0 (.cons 18 (.cons 127
+  (.cons 34 (.cons 32 (.cons 128 (.cons 0 (.cons 1 (.cons 0 (.cons 127 (.cons 0 (.cons 7 (.cons 0
+  (.cons 0 .nil))))))))))))))))))))
+
+-- the number of argument bytes of a command (the datasheet's command table, for the
+-- fundamental, addressing, hardware configuration, timing and charge pump commands; the
+-- scrolling commands are not modelled)
+def Ssd.argCount (b : Nat) : Nat :=
+  match Nat.beq b 33, Nat.beq b 34 with
+  | .true, _ => 2
+  | _, .true => 2
+  | _, _ => match Bool.or (Nat.beq b 32) (Bool.or (Nat.beq b 129) (Bool.or (Nat.beq b 141)
+      (Bool.or (Nat.beq b 168) (Bool.or (Nat.beq b 211) (Bool.or (Nat.beq b 213)
+      (Bool.or (Nat.beq b 217) (Bool.or (Nat.beq b 218) (Nat.beq b 219)))))))) with
+    | .true => 1
+    | .false => 0
+
+-- the register a one-argument command sets
+def Ssd.argReg (b : Nat) : Nat :=
+  match Nat.beq b 32, Nat.beq b 129, Nat.beq b 141, Nat.beq b 168 with
+  | .true, _, _, _ => R.mode
+  | _, .true, _, _ => R.contrast
+  | _, _, .true, _ => R.pump
+  | _, _, _, .true => R.mux
+  | _, _, _, _ => match Nat.beq b 211, Nat.beq b 213, Nat.beq b 217, Nat.beq b 218 with
+    | .true, _, _, _ => R.offset
+    | _, .true, _, _ => R.clock
+    | _, _, .true, _ => R.precharge
+    | _, _, _, .true => R.comPins
+    | _, _, _, _ => R.vcomh
+
+-- a command without arguments
+def Ssd.plain (s : List Nat) (b : Nat) : List Nat :=
+  match Nat.beq b 174, Nat.beq b 175 with
+  | .true, _ => R.set s R.on 0
+  | _, .true => R.set s R.on 1
+  | _, _ => match Bool.and (Nat.le 64 b) (Nat.lt b 128), Nat.beq (Nat.div b 2) 80 with
+    | .true, _ => R.set s R.start (b - 64)
+    | _, .true => R.set s R.remap (b - 160)
+    | _, _ => match Nat.beq b 192, Nat.beq b 200 with
+      | .true, _ => R.set s R.comRev 0
+      | _, .true => R.set s R.comRev 1
+      | _, _ => match Nat.beq b 164, Nat.beq b 165, Nat.beq b 166, Nat.beq b 167 with
+        | .true, _, _, _ => R.set s R.resume 1
+        | _, .true, _, _ => R.set s R.resume 0
+        | _, _, .true, _ => R.set s R.inverse 0
+        | _, _, _, .true => R.set s R.inverse 1
+        | _, _, _, _ => s
+
+-- one command with its arguments
+def Ssd.cmd (s : List Nat) (b : Nat) (args : List Nat) : List Nat :=
+  let a := Hdl.nthD 0 args 0;
+  let a2 := Hdl.nthD 0 args 1;
+  match Ssd.argCount b with
+  | .zero => Ssd.plain s b
+  | _ => match Nat.beq b 33, Nat.beq b 34 with
+    | .true, _ => R.set (R.set (R.set s R.c0 a) R.c1 a2) R.col a
+    | _, .true => R.set (R.set (R.set s R.p0 a) R.p1 a2) R.page a
+    | _, _ => R.set s (Ssd.argReg b) a
+
+-- Command bytes, grouped by the argument counts, applied in order. What is left over
+-- (an incomplete command) is returned.
+def Ssd.run : Nat → List Nat → List Nat → List Nat × List Nat
+  | .zero, s, bs => (s, bs)
+  | .succ fuel, s, bs => match bs with
+    | .nil => (s, .nil)
+    | .cons b rest => match Nat.le (Ssd.argCount b) (List.length rest) with
+      | .true => Ssd.run fuel (Ssd.cmd s b (List.take (Ssd.argCount b) rest)) (List.drop (Ssd.argCount b) rest)
+      | .false => (s, bs)
+
+def Ssd.ofCmds (bs : List Nat) : List Nat := (Ssd.run (List.length bs) R.reset bs).1
+
+def Ssd.comPinsFor (rows : Nat) : Nat := match Nat.beq rows 64 with
+  | .true => 18
+  | .false => 2
+
+-- the configuration the demo wants: on, charge pump on, the panel's rows, horizontal
+-- addressing over the whole panel, column 127 at SEG0, COM backwards, the COM pins for
+-- the panel, not inverted, following the RAM
+def Ssd.wanted (rows : Nat) (s : List Nat) : Bool :=
+  List.all (fun (kv : Nat × Nat) => R.is s kv.1 kv.2)
+    (.cons (R.on, 1) (.cons (R.pump, 20) (.cons (R.mux, rows - 1) (.cons (R.offset, 0)
+    (.cons (R.start, 0) (.cons (R.mode, 0) (.cons (R.remap, 1) (.cons (R.comRev, 1)
+    (.cons (R.comPins, Ssd.comPinsFor rows) (.cons (R.resume, 1) (.cons (R.inverse, 0)
+    (.cons (R.c0, 0) (.cons (R.c1, 127) (.cons (R.p0, 0) (.cons (R.p1, Nat.div rows 8 - 1)
+    .nil)))))))))))))))
+
+------------------------------------------------------------------------------------
+-- Data bytes and frames. A frame is the RAM, taken at the end of a run of data bytes
+-- (CS high, or a command byte) if the display was on.
+
+def Ram.empty : List Nat := Wave.rep 1024 0 .nil
+
+-- horizontal addressing: the next column, then the next page, within the ranges
+def Ssd.advance (s : List Nat) : List Nat := match Nat.lt (R.get s R.col) (R.get s R.c1) with
+  | .true => R.set s R.col (R.get s R.col + 1)
+  | .false => match Nat.lt (R.get s R.page) (R.get s R.p1) with
+    | .true => R.set (R.set s R.col (R.get s R.c0)) R.page (R.get s R.page + 1)
+    | .false => R.set (R.set s R.col (R.get s R.c0)) R.page (R.get s R.p0)
+
+structure Frame where
+  cycle : Nat         -- when the first data byte of the frame arrived
+  bytes : Nat         -- how many data bytes the frame had
+  ram : List Nat
+
+-- The cycles of: VDD on, RES low, RES high, VBAT on, the first byte, display on (the
+-- first time), by these indices; and the number of bytes that arrived while VDD was
+-- off or RES low (the serial interface ignores them; there should be none).
+def T.vdd : Nat := 0
+def T.resLo : Nat := 1
+def T.resHi : Nat := 2
+def T.vbat : Nat := 3
+def T.first : Nat := 4
+def T.on : Nat := 5
+
+structure Model where
+  regs : List Nat
+  ram : List Nat
+  pending : List Nat  -- command bytes not yet complete
+  cmds : List Nat     -- every command byte, newest first
+  data : Nat          -- data bytes since CS went low
+  first : Nat         -- the cycle of the first of them
+  frames : List Frame -- newest first
+  times : List Nat
+  nbytes : Nat        -- bytes so far
+
+def Model.init : Model := Model.mk R.reset Ram.empty .nil .nil 0 0 .nil (Wave.rep 6 0 .nil) 0
+
+-- the end of a run of data bytes (CS high, or a command)
+def Model.csHigh (m : Model) : Model := match Bool.and (R.is m.regs R.on 1) (Bool.not (Nat.beq m.data 0)) with
+  | .true => Model.mk m.regs m.ram m.pending m.cmds 0 m.first (.cons (Frame.mk m.first m.data m.ram) m.frames) m.times m.nbytes
+  | .false => Model.mk m.regs m.ram m.pending m.cmds 0 m.first m.frames m.times m.nbytes
+
+def Model.byte (m0 : Model) (c dc b : Nat) : Model :=
+  -- a command ends the data before it (a frame, if the display is on)
+  let m := match Nat.beq dc 0 with
+    | .true => Model.csHigh m0
+    | .false => m0;
+  let times := match Nat.beq m.nbytes 0 with
+    | .true => R.set m.times T.first c
+    | .false => m.times;
+  match Nat.beq dc 0 with
+  | .true =>
+    let p := List.append m.pending (.cons b .nil);
+    let r := Ssd.run (List.length p) m.regs p;
+    let times2 := match Bool.and (R.is m.regs R.on 0) (R.is r.1 R.on 1) with
+      | .true => (match R.get times T.on with
+        | .zero => R.set times T.on c
+        | _ => times)
+      | .false => times;
+    Model.mk r.1 m.ram r.2 (.cons b m.cmds) m.data m.first m.frames times2 (m.nbytes + 1)
+  | .false =>
+    let s := m.regs;
+    Model.mk (Ssd.advance s) (Ram.set m.ram (R.get s R.page * 128 + R.get s R.col) b) m.pending m.cmds
+      (m.data + 1) (match Nat.beq m.data 0 with
+        | .true => c
+        | .false => m.first) m.frames times (m.nbytes + 1)
+
+def Model.setTime (m : Model) (k c : Nat) : Model :=
+  Model.mk m.regs m.ram m.pending m.cmds m.data m.first m.frames (R.set m.times k c) m.nbytes
+
+-- RES low resets the registers
+def Model.pin (m : Model) (c k v : Nat) : Model := match Nat.beq k 0, Nat.beq v 0 with
+  | .true, .true => Model.mk R.reset m.ram .nil m.cmds m.data m.first m.frames (R.set m.times T.resLo c) m.nbytes
+  | .true, .false => Model.setTime m T.resHi c
+  | .false, .true => (match Nat.beq k 1 with
+    | .true => Model.setTime m T.vbat c
+    | .false => Model.setTime m T.vdd c)
+  | .false, .false => m
+
+def Model.go : Model → List SEv → Model
+  | m, .nil => m
+  | m, .cons e es => match e with
+    | .byte c dc b => Model.go (Model.byte m c dc b) es
+    | .csHigh c => Model.go (Model.csHigh m) es
+    | .pin c k v => Model.go (Model.pin m c k v) es
+
+def Model.ofRun (ys : List (List Nat)) : Model := Model.go Model.init (SEv.ofRun ys)
+
+------------------------------------------------------------------------------------
+-- What a frame must be: the effect at the frame's time, pixel by pixel. A frame's time
+-- is the frame counter while it streams: `t0` plus `tStep` for every tick of the frame
+-- timer up to then (ticks at 2^fl - 1, 2^fl · 2 - 1, …).
+
+def Ref.time (c : OledCfg) (cycle : Nat) : Nat :=
+  Nat.mod (c.t0 + c.tStep * Nat.div (cycle + 1) (Nat.pow 2 c.frameLog)) 2048
+
+def Ref.pixel (c : OledCfg) (e x y lt : Nat) : Nat :=
+  BitVec.toNat (@demoPixel HwTy.El _ c.rows (BitVec.ofNat 2 e) (BitVec.ofNat 7 x) (BitVec.ofNat 6 y) (BitVec.ofNat 9 lt))
+
+-- byte `idx` (page on top of the column): bit k the pixel at row 8 · page + k
+def Ref.byteGo (c : OledCfg) (e x y0 lt : Nat) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc => Ref.byteGo c e x y0 lt k (acc * 2 + Ref.pixel c e x (y0 + k) lt)
+def Ref.bytesGo (c : OledCfg) (e lt : Nat) : Nat → Nat → List Nat → List Nat
+  | .zero, idx, acc => Hdl.reverse acc
+  | .succ n, idx, acc => Ref.bytesGo c e lt n (idx + 1)
+      (.cons (Ref.byteGo c e (Nat.mod idx 128) (8 * Nat.div idx 128) lt 8 0) acc)
+-- the frame for effect `e` at time `lt` within it
+def Ref.frame (c : OledCfg) (e lt : Nat) : List Nat := Ref.bytesGo c e lt (OledCfg.bytes c) 0 .nil
+-- the frame for the frame counter `t` (no key pressed)
+def Ref.frameAt (c : OledCfg) (t : Nat) : List Nat := Ref.frame c (Nat.div t 512) (Nat.mod t 512)
+
+------------------------------------------------------------------------------------
+-- Pictures: PBM ("P1", text), one character per pixel.
+
+def Pbm.pixel (ram : List Nat) (x y : Nat) : String :=
+  match Nat.beq (Nat.mod (Nat.div (Hdl.nthD 0 ram (Nat.div y 8 * 128 + x)) (Nat.pow 2 (Nat.mod y 8))) 2) 1 with
+  | .true => "1"
+  | .false => "0"
+def Pbm.row (ram : List Nat) (y : Nat) : Nat → Nat → List String → List String
+  | .zero, x, acc => acc
+  | .succ k, x, acc => Pbm.row ram y k (x + 1) (.cons (Pbm.pixel ram x y) acc)
+def Pbm.rows (ram : List Nat) : Nat → Nat → List String → List String
+  | .zero, y, acc => acc
+  | .succ k, y, acc => Pbm.rows ram k (y + 1) (.cons "\n" (Pbm.row ram y 128 0 acc))
+def Pbm.of (rows : Nat) (ram : List Nat) : String :=
+  "P1\n128 " <+> Hdl.show rows <+> "\n" <+> Hdl.concat (Hdl.reverse (Pbm.rows ram rows 0 .nil))
+
+------------------------------------------------------------------------------------
+-- The scenarios: the UART line, cycle by cycle (high: idle). The fast designs run until
+-- `frames` frames have been shown; in `oled_fast` the host types `3` (keep the scroller)
+-- before the last one. The board designs run for the power-up's first part (the 100 ms
+-- wait for VBAT alone is 1.2 million cycles).
+
+def Oled.frames (name : String) : Nat := match Hdl.strEq name "oled_fast" with
+  | .true => 10
+  | .false => 6
+
+def Oled.isBoard (name : String) : Bool := Bool.or (Hdl.strEq name "oled") (Hdl.strEq name "oled64")
+
+def Oled.cycles (name : String) : Nat :=
+  let c := Oled.cfgOf name;
+  match Oled.isBoard name with
+  | .true => 50000
+  | .false => (Oled.frames name + 1) * Nat.pow 2 c.frameLog + Nat.div (Nat.pow 2 c.frameLog) 2
+
+-- the cycle at which the key's start bit begins (0: no key)
+def Oled.keyAt (name : String) : Nat := match Hdl.strEq name "oled_fast" with
+  | .true => Oled.frames name * Nat.pow 2 (Oled.cfgOf name).frameLog - 2000
+  | .false => 0
+
+-- the host's bit period at 115200 baud: 625/6 cycles
+def Oled.line (name : String) : List Nat := match Oled.keyAt name with
+  | .zero => Wave.rep (Oled.cycles name) 1 .nil
+  | .succ k => Wave.events 625 6 (.cons (Ev.idle (Nat.succ k)) (.cons (Ev.byte 51)
+      (.cons (Ev.idle (Oled.cycles name - Nat.succ k - 1100)) .nil)))
+
+def Oled.input (name : String) : List (List Nat) :=
+  Hdl.map (fun (b : Nat) => List.cons b List.nil) (Oled.line name)
+
+-- the effect a frame must show: the scroller once the key is in, else by the time
+def Oled.effectOf (name : String) (c : OledCfg) (cycle : Nat) : Nat :=
+  match Bool.and (Bool.not (Nat.beq (Oled.keyAt name) 0)) (Nat.lt (Oled.keyAt name + 1200) cycle) with
+  | .true => 2
+  | .false => Nat.div (Ref.time c cycle) 512

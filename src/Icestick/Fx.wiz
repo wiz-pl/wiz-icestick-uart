@@ -1,0 +1,196 @@
+import Icestick.Oled
+-- The effects: each a pixel as a function of the column x (0 … 127), the row y (0 … 63)
+-- and the time (the frame counter), computed while the frame streams to the display
+-- (one pixel per cycle, no frame buffer). `rows` is the panel's height, 64 or 32 (the
+-- Digilent PmodOLED's). No multipliers (the HX1K has none, and a
+-- multiplier in logic cells is large): sines from a quarter-wave table, sums, XORs,
+-- small tables, and ordered dithering for the grey levels.
+--
+--  0. plasma: four sine waves (one along x, one along y, one along the diagonal, one
+--     along y bent by the first), summed, the middle of the range stretched to 16 grey
+--     levels, dithered (4 × 4 Bayer);
+--  1. starfield: three layers of stars scrolling left at 1/2, 1 and 2 pixels a frame;
+--  2. sine scroller: "WIZ ON ICE40" in an 8 × 8 font at twice the size, scrolling left
+--     one pixel a frame, each column moved up and down by a sine wave that travels
+--     along the text, over the starfield;
+--  3. XOR pattern: the classic (u xor v) texture as grey levels, dithered, panning
+--     round a circle.
+--
+-- Each effect runs for 512 frames (5.6 s at 91.6 frames per second); the next one wipes
+-- in from the left during its first 64 frames.
+
+------------------------------------------------------------------------------------
+-- Sine: 64 steps a period, values 0 … 31 (16 + 15.5 sin, rounded towards the middle),
+-- from a quarter-wave table of 16 entries sampled half a step off the axis, so that the
+-- mirrored quarters fit without a repeated entry.
+
+-- round(15.5 · sin(2π (i + 1/2) / 64)), i = 0 … 15
+def Fx.quarter : List Nat :=
+  .cons 1 (.cons 2 (.cons 4 (.cons 5 (.cons 7 (.cons 8 (.cons 9 (.cons 10
+  (.cons 11 (.cons 12 (.cons 13 (.cons 14 (.cons 15 (.cons 15 (.cons 15 (.cons 15 .nil)))))))))))))))
+
+def Fx.quarterT : RomT := RomT.build 4 Fx.quarter
+
+def rep4 {r : HwTy → Type} [Hw r] (b : r Bit) : r D4 := Hw.cat b (Hw.cat b (Hw.cat b b))
+
+def sin6 {r : HwTy → Type} [Hw r] (p : r D6) : r D5 :=
+  let i := Hw.xor (Hw.slice 0 4 p) (rep4 (Hw.slice 4 1 p));
+  let q := Rom.at 4 i Fx.quarterT;
+  let neg := Hw.slice 5 1 p;
+  Hw.cat (bnot neg) (Hw.xor q (rep4 neg))
+
+-- the same on numbers (the specification: `Icestick.Proofs.Oled` checks all 64)
+def Fx.sinSpec (p : Nat) : Nat :=
+  let q := Hdl.nthD 0 Fx.quarter (match Nat.lt (Nat.mod p 32) 16 with
+    | .true => Nat.mod p 16
+    | .false => 15 - Nat.mod p 16);
+  match Nat.lt p 32 with
+  | .true => 16 + q
+  | .false => 15 - q
+
+------------------------------------------------------------------------------------
+-- Ordered dithering: a grey level 0 … 15 becomes a pixel that is on with that
+-- probability in 16ths, by the 4 × 4 Bayer matrix
+--   0  8  2 10
+--  12  4 14  6
+--   3 11  1  9
+--  15  7 13  5
+-- whose entry at (x, y) is, bit by bit from the top, b0 y0 b1 y1 with b = x xor y (two
+-- XOR gates, no table).
+
+def bayer {r : HwTy → Type} [Hw r] (x : r D7) (y : r D6) : r D4 :=
+  let b := Hw.xor (Hw.slice 0 2 x) (Hw.slice 0 2 y);
+  Hw.cat (Hw.slice 0 1 b) (Hw.cat (Hw.slice 0 1 y) (Hw.cat (Hw.slice 1 1 b) (Hw.slice 1 1 y)))
+
+def dither {r : HwTy → Type} [Hw r] (x : r D7) (y : r D6) (level : r D4) : r Bit :=
+  Hw.ult (bayer x y) level
+
+------------------------------------------------------------------------------------
+-- 0. Plasma
+
+def plasma {r : HwTy → Type} [Hw r] (x : r D7) (y : r D6) (t : r D9) : r Bit :=
+  let tt := Hw.slice 0 6 t;
+  let a := sin6 (Hw.add (Hw.slice 1 6 x) tt);
+  let b := sin6 (Hw.add y (Hw.cat (Hw.slice 0 5 t) lo));
+  let c := sin6 (Hw.sub (Hw.slice 1 6 (Hw.add x (zext 1 y))) tt);
+  let d := sin6 (Hw.sub (Hw.add y (zext 1 a)) tt);
+  let sum := Hw.add (Hw.add (zext 2 a) (zext 2 b)) (Hw.add (zext 2 c) (zext 2 d));
+  -- the sum is 0 … 124, mostly 30 … 94: that window, stretched to the 16 levels
+  let d0 := Hw.sub sum (Hw.lit 7 30);
+  let level := Hw.mux (Hw.ult sum (Hw.lit 7 30)) (Hw.lit 4 0)
+    (Hw.mux (Hw.slice 6 1 d0) (Hw.lit 4 15) (Hw.slice 2 4 d0));
+  dither x y level
+
+------------------------------------------------------------------------------------
+-- 1. Starfield. A layer is a strip 256 pixels wide that scrolls left; in each column of
+-- the strip there is at most one star, at the row the table gives (bit 6: is there a
+-- star). The table has 64 entries; the strip's four quarters read it in different
+-- orders, and each layer XORs the index with its own salt.
+
+def Fx.lcg (s : Nat) : Nat := Nat.mod (s * 1103515245 + 12345) 2147483648
+def Fx.starsGo : Nat → Nat → List Nat
+  | .zero, s => .nil
+  | .succ k, s =>
+    let s1 := Fx.lcg s;
+    let s2 := Fx.lcg s1;
+    -- a star in 3 of 8 columns
+    .cons (Nat.add (match Nat.lt (Nat.mod (Nat.div s1 65536) 8) 3 with
+      | .true => 64
+      | .false => 0) (Nat.mod (Nat.div s2 65536) 64)) (Fx.starsGo k s2)
+def Fx.stars : List Nat := Fx.starsGo 64 2026
+def Fx.starsT : RomT := RomT.build 6 Fx.stars
+
+def starLayer {r : HwTy → Type} [Hw r] (rows : Nat) (x : r D7) (y : r D6) (off : r D8) (salt : Nat) : r Bit :=
+  let xs := Hw.add (zext 1 x) off;
+  let q := Hw.slice 6 2 xs;
+  let idx := Hw.xor (Hw.slice 0 6 xs) (Hw.xor (Hw.cat q (Hw.cat q q)) (Hw.lit 6 salt));
+  let e := Rom.at 7 idx Fx.starsT;
+  let row := match Nat.beq rows 64 with
+    | .true => Hw.slice 0 6 e
+    | .false => Hw.cat lo (Hw.slice 0 5 e);
+  band (Hw.slice 6 1 e) (Hw.eq row y)
+
+def starfield {r : HwTy → Type} [Hw r] (rows : Nat) (x : r D7) (y : r D6) (t : r D9) : r Bit :=
+  bor (starLayer rows x y (Hw.slice 1 8 t) 5)
+    (bor (starLayer rows x y (Hw.slice 0 8 t) 42) (starLayer rows x y (Hw.cat (Hw.slice 0 7 t) lo) 23))
+
+------------------------------------------------------------------------------------
+-- 2. Sine scroller. The font: 8 × 8, rows from the top, bit 7 the leftmost pixel; the
+-- memory holds columns (bit 0 the top row), eight per glyph.
+
+def G8 (a b c d e f g h : Nat) : List Nat :=
+  .cons a (.cons b (.cons c (.cons d (.cons e (.cons f (.cons g (.cons h .nil)))))))
+
+-- space W I Z O N C E 4 0
+def Fx.glyphs : List (List Nat) :=
+  .cons (G8 0 0 0 0 0 0 0 0)
+  (.cons (G8 130 130 130 146 146 170 68 0)        -- W
+  (.cons (G8 124 16 16 16 16 16 124 0)            -- I
+  (.cons (G8 254 4 8 16 32 64 254 0)              -- Z
+  (.cons (G8 124 130 130 130 130 130 124 0)       -- O
+  (.cons (G8 130 194 162 146 138 134 130 0)       -- N
+  (.cons (G8 124 130 128 128 128 130 124 0)       -- C
+  (.cons (G8 254 128 128 252 128 128 254 0)       -- E
+  (.cons (G8 12 20 36 68 254 4 4 0)               -- 4
+  (.cons (G8 124 134 138 146 162 194 124 0)       -- 0
+  .nil)))))))))
+
+-- "WIZ ON ICE40" and four spaces, as glyph numbers
+def Fx.message : List Nat :=
+  .cons 1 (.cons 2 (.cons 3 (.cons 0 (.cons 4 (.cons 5 (.cons 0 (.cons 2
+  (.cons 6 (.cons 7 (.cons 8 (.cons 9 (.cons 0 (.cons 0 (.cons 0 (.cons 0 .nil)))))))))))))))
+
+-- column `c` of a glyph given by its rows
+def Fx.colGo : List Nat → Nat → Nat → Nat → Nat
+  | .nil, m, w, acc => acc
+  | .cons row rs, m, w, acc => Fx.colGo rs m (w * 2) (acc + w * Nat.mod (Nat.div row m) 2)
+def Fx.colOf (rows : List Nat) (c : Nat) : Nat :=
+  Fx.colGo rows (Nat.pow 2 (7 - c)) 1 0
+def Fx.cols8 (rows : List Nat) : Nat → List Nat
+  | .zero => .nil
+  | .succ k => .cons (Fx.colOf rows (7 - k)) (Fx.cols8 rows k)
+def Fx.fontGo : List (List Nat) → List Nat
+  | .nil => .nil
+  | .cons g gs => List.append (Fx.cols8 g 8) (Fx.fontGo gs)
+-- address: glyph (4 bits) on top of the column (3 bits)
+def Fx.font : List Nat := Fx.fontGo Fx.glyphs
+def Fx.fontT : RomT := RomT.build 7 Fx.font
+def Fx.messageT : RomT := RomT.build 4 Fx.message
+
+def scroller {r : HwTy → Type} [Hw r] (rows : Nat) (x : r D7) (y : r D6) (t : r D9) : r Bit :=
+  let xs := Hw.add (zext 1 x) (Hw.slice 0 8 t);
+  let ch := Rom.at 4 (Hw.slice 4 4 xs) Fx.messageT;
+  let col := Rom.at 8 (Hw.cat ch (Hw.slice 1 3 xs)) Fx.fontT;
+  let wave := sin6 (Hw.add (Hw.slice 1 6 x) (Hw.cat (Hw.slice 0 5 t) lo));
+  -- the text's top row: 16 … 31 on 64 rows, 0 … 15 on 32
+  let top := match Nat.beq rows 64 with
+    | .true => Hw.cat (Hw.lit 2 1) (Hw.slice 1 4 wave)
+    | .false => zext 2 (Hw.slice 1 4 wave);
+  let dy := Hw.sub y top;
+  band (eqLit (Hw.slice 4 2 dy) 0) (pickBit col (Hw.slice 1 3 dy) 3 0)
+
+------------------------------------------------------------------------------------
+-- 3. XOR pattern, panning round a circle of radius 15.5 (a sine and a cosine).
+
+def xorfx {r : HwTy → Type} [Hw r] (x : r D7) (y : r D6) (t : r D9) : r Bit :=
+  let ph := Hw.slice 1 6 t;
+  let ox := sin6 ph;
+  let oy := sin6 (Hw.add ph (Hw.lit 6 16));
+  let u := Hw.add x (Hw.cat (Hw.lit 1 0) (Hw.cat ox (Hw.slice 2 1 t)));
+  let v := Hw.add (zext 1 y) (Hw.cat (Hw.lit 2 0) oy);
+  dither x y (Hw.slice 1 4 (Hw.xor u v))
+
+------------------------------------------------------------------------------------
+-- The sequence. The frame counter `t` (11 bits): effect t[10:9], time within it t[8:0].
+
+def effect {r : HwTy → Type} [Hw r] (rows : Nat) (e : r D2) (x : r D7) (y : r D6) (t : r D9) (stars : r Bit) : r Bit :=
+  Hw.mux (Hw.slice 1 1 e)
+    (Hw.mux (Hw.slice 0 1 e) (xorfx x y t) (bor (scroller rows x y t) stars))
+    (Hw.mux (Hw.slice 0 1 e) stars (plasma x y t))
+
+-- effect `e` at time `lt`, the one before it to the right of the wipe (at the same
+-- time: the effects are computed once, for both)
+def demoPixel {r : HwTy → Type} [Hw r] (rows : Nat) (e : r D2) (x : r D7) (y : r D6) (lt : r D9) : r Bit :=
+  let stars := starfield rows x y lt;
+  let wiping := band (eqLit (Hw.slice 6 3 lt) 0) (bnot (Hw.ult x (Hw.cat (Hw.slice 0 6 lt) lo)));
+  Hw.mux wiping (effect rows (dec e) x y lt stars) (effect rows e x y lt stars)

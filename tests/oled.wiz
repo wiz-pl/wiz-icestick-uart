@@ -1,0 +1,55 @@
+-- test: run
+import Icestick.OledSim
+import IO
+-- The OLED demo's parts, compiled (the kernel proves the same in Icestick.Proofs.Oled;
+-- the whole design, frame by frame, is checked by `oled gen`):
+--  1. the SPI serialiser for every byte from both idle states;
+--  2. the sine against its specification;
+--  3. the power-up commands, decoded by the SSD1306 model, for both panels;
+--  4. the design `oled_fast` for its first 12000 cycles: VDD, the reset pulse, and the
+--     command bytes up to the clear screen, from its pins.
+
+def yes (b : Bool) : String := match b with
+  | .true => "yes"
+  | .false => "NO"
+
+def SpiT.step (s : Spi HwTy.El) (load d : Nat) : Spi HwTy.El :=
+  Spi.unpack (@spiStep HwTy.El _ s (BitVec.ofNat 1 load) (BitVec.ofNat 8 d))
+def SpiT.edges : Nat → Nat → Spi HwTy.El → List Nat
+  | .zero, prev, s => .nil
+  | .succ k, prev, s =>
+    let rest := SpiT.edges k (BitVec.toNat s.sclk) (SpiT.step s 0 0);
+    match Bool.and (Nat.beq prev 0) (Nat.beq (BitVec.toNat s.sclk) 1) with
+    | .true => .cons (BitVec.toNat s.mosi) rest
+    | .false => rest
+def SpiT.msb (b : Nat) : Nat → List Nat
+  | .zero => .nil
+  | .succ k => .cons (Nat.mod (Nat.div b (Nat.pow 2 k)) 2) (SpiT.msb b k)
+def SpiT.okFrom (s0 : Spi HwTy.El) (b : Nat) : Bool :=
+  Hdl.natsEq (SpiT.edges 16 (BitVec.toNat s0.sclk) (SpiT.step s0 1 b)) (SpiT.msb b 8)
+def SpiT.idleHigh : Spi HwTy.El := Spi.mk (BitVec.ofNat 1 1) (BitVec.ofNat 1 0) (BitVec.ofNat 7 42) (BitVec.ofNat 4 0)
+
+def countBad (p : Nat → Bool) : Nat → Nat
+  | .zero => 0
+  | .succ k => match p k with
+    | .true => countBad p k
+    | .false => 1 + countBad p k
+
+def SinT.ok (p : Nat) : Bool := Nat.beq (BitVec.toNat (@sin6 HwTy.El _ (BitVec.ofNat 6 p))) (Fx.sinSpec p)
+
+def showNats : List Nat → String
+  | .nil => ""
+  | .cons x xs => Hdl.show x <+> " " <+> showNats xs
+
+def main : IO Unit := do
+  IO.println ("spi, bytes wrong from low idle: " <+> Hdl.show (countBad (SpiT.okFrom Spi.init) 256)
+    <+> ", from high idle: " <+> Hdl.show (countBad (SpiT.okFrom SpiT.idleHigh) 256));
+  IO.println ("sine, phases wrong: " <+> Hdl.show (countBad SinT.ok 64));
+  IO.println ("init 128x32 as wanted: " <+> yes (Ssd.wanted 32 (Ssd.ofCmds (Prog.cmdsOf (Prog.init OledCfg.board32)))));
+  IO.println ("init 128x64 as wanted: " <+> yes (Ssd.wanted 64 (Ssd.ofCmds (Prog.cmdsOf (Prog.init OledCfg.board)))));
+  IO.println ("init 128x32 bytes: " <+> showNats (Prog.cmdsOf (Prog.init OledCfg.board32)));
+  let m := Model.ofRun (Design.runLeaves (Circuit.design "oled_fast" (demo Oled.fast32 Oled.bit))
+    (Hdl.map (fun (b : Nat) => List.cons b List.nil) (Wave.rep 12000 1 .nil)));
+  IO.println ("oled_fast, 12000 cycles: VDD on at " <+> Hdl.show (R.get m.times T.vdd)
+    <+> ", RES low " <+> Hdl.show (R.get m.times T.resLo) <+> " … " <+> Hdl.show (R.get m.times T.resHi));
+  IO.println ("  command bytes: " <+> showNats (Hdl.reverse m.cmds))

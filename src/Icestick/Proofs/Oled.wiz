@@ -1,0 +1,160 @@
+import Icestick.Proofs
+import Icestick.OledSim
+-- What is proved about the OLED demo, about the very functions that are synthesised
+-- (`spiStep`, `sin6`, `Rom.at` with the program's and the font's trees, `Prog.init`), at
+-- values. The kernel checks each statement by running them.
+
+def bitOf {0 n : Nat} (b : BitVec n) : Nat := BitVec.toNat b
+
+------------------------------------------------------------------------------------
+-- 1. The SPI serialiser. From an idle state (SCLK low, as after power-up, or high, as
+--    after a byte), a byte `b` loaded in one cycle comes out as exactly eight rising
+--    edges of SCLK in the next 16 cycles, SDIN at the k-th of them being bit 7 - k of
+--    `b`; the serialiser is busy in the first 15 of those cycles and idle in the 16th
+--    (so the next byte can be loaded then, and bytes follow back to back).
+
+def SpiP.step (s : Spi HwTy.El) (load d : Nat) : Spi HwTy.El :=
+  Spi.unpack (@spiStep HwTy.El _ s (BitVec.ofNat 1 load) (BitVec.ofNat 8 d))
+
+-- SDIN at the rising edges of SCLK in `k` cycles, from state `s` (the pins' levels in
+-- the cycle before: `prev`); nothing is loaded
+def SpiP.edges : Nat → Nat → Spi HwTy.El → List Nat
+  | .zero, prev, s => .nil
+  | .succ k, prev, s =>
+    let rest := SpiP.edges k (bitOf s.sclk) (SpiP.step s 0 0);
+    match Bool.and (Nat.beq prev 0) (Nat.beq (bitOf s.sclk) 1) with
+    | .true => .cons (bitOf s.mosi) rest
+    | .false => rest
+
+-- idle in each of the next `k` cycles: the list of answers
+def SpiP.ready : Nat → Spi HwTy.El → List Nat
+  | .zero, s => .nil
+  | .succ k, s => .cons (bitOf (@spiReady HwTy.El _ s)) (SpiP.ready k (SpiP.step s 0 0))
+
+-- the bits of `b`, most significant first
+def SpiP.msb (b : Nat) : Nat → List Nat
+  | .zero => .nil
+  | .succ k => .cons (Nat.mod (Nat.div b (Nat.pow 2 k)) 2) (SpiP.msb b k)
+
+def SpiP.from (s0 : Spi HwTy.El) (b : Nat) : Bool :=
+  let s1 := SpiP.step s0 1 b;
+  Bool.and (Hdl.natsEq (SpiP.edges 16 (bitOf s0.sclk) s1) (SpiP.msb b 8))
+    (Hdl.natsEq (SpiP.ready 16 s1) (List.append (Wave.rep 15 0 .nil) (.cons 1 .nil)))
+
+-- idle with SCLK high, SDIN high, some bits left in the shift register
+def SpiP.idleHigh : Spi HwTy.El := Spi.mk (BitVec.ofNat 1 1) (BitVec.ofNat 1 1) (BitVec.ofNat 7 85) (BitVec.ofNat 4 0)
+
+def SpiP.ok (b : Nat) : Bool := Bool.and (SpiP.from Spi.init b) (SpiP.from SpiP.idleHigh b)
+
+-- (in sixteen ranges of sixteen bytes: the kernel keeps what it evaluates until the end
+-- of a declaration, FINDINGS.md G11)
+def SpiP.at (base k : Nat) : Bool := SpiP.ok (base + k)
+def SpiP.inRange (base : Nat) (h : allBelow 16 (SpiP.at base) = .true)
+    (k : Nat) (hk : Nat.lt k 16 = .true) : SpiP.ok (base + k) = .true :=
+  allBelow_spec k 16 (SpiP.at base) h hk
+def SpiP.range_00 : allBelow 16 (SpiP.at 0) = .true := refl Bool.true
+def SpiP.range_10 : allBelow 16 (SpiP.at 16) = .true := refl Bool.true
+def SpiP.range_20 : allBelow 16 (SpiP.at 32) = .true := refl Bool.true
+def SpiP.range_30 : allBelow 16 (SpiP.at 48) = .true := refl Bool.true
+def SpiP.range_40 : allBelow 16 (SpiP.at 64) = .true := refl Bool.true
+def SpiP.range_50 : allBelow 16 (SpiP.at 80) = .true := refl Bool.true
+def SpiP.range_60 : allBelow 16 (SpiP.at 96) = .true := refl Bool.true
+def SpiP.range_70 : allBelow 16 (SpiP.at 112) = .true := refl Bool.true
+def SpiP.range_80 : allBelow 16 (SpiP.at 128) = .true := refl Bool.true
+def SpiP.range_90 : allBelow 16 (SpiP.at 144) = .true := refl Bool.true
+def SpiP.range_a0 : allBelow 16 (SpiP.at 160) = .true := refl Bool.true
+def SpiP.range_b0 : allBelow 16 (SpiP.at 176) = .true := refl Bool.true
+def SpiP.range_c0 : allBelow 16 (SpiP.at 192) = .true := refl Bool.true
+def SpiP.range_d0 : allBelow 16 (SpiP.at 208) = .true := refl Bool.true
+def SpiP.range_e0 : allBelow 16 (SpiP.at 224) = .true := refl Bool.true
+def SpiP.range_f0 : allBelow 16 (SpiP.at 240) = .true := refl Bool.true
+
+------------------------------------------------------------------------------------
+-- 2. The tables. The sine is the specification's for all 64 phases; the program's memory
+--    gives every entry of the program (both panels) and the program fits it; the font's
+--    memory gives every column of every glyph.
+
+def SinP.ok (p : Nat) : Bool := Nat.beq (bitOf (@sin6 HwTy.El _ (BitVec.ofNat 6 p))) (Fx.sinSpec p)
+def SinP.all : allBelow 64 SinP.ok = .true := refl Bool.true
+
+def RomP.ok (c : OledCfg) (k : Nat) : Bool :=
+  Nat.beq (bitOf (@Rom.at HwTy.El _ 9 6 (BitVec.ofNat 6 k) (Prog.tree c))) (Hdl.nthD 0 (Prog.rom c) k)
+def RomP.board32 : allBelow 64 (RomP.ok OledCfg.board32) = .true := refl Bool.true
+def RomP.board64 : allBelow 64 (RomP.ok OledCfg.board) = .true := refl Bool.true
+def RomP.fits32 : Nat.le (List.length (Prog.rom OledCfg.board32)) 64 = .true := refl Bool.true
+def RomP.fits64 : Nat.le (List.length (Prog.rom OledCfg.board)) 64 = .true := refl Bool.true
+
+def FontP.ok (k : Nat) : Bool :=
+  Nat.beq (bitOf (@Rom.at HwTy.El _ 8 7 (BitVec.ofNat 7 k) Fx.fontT)) (Hdl.nthD 0 Fx.font k)
+def FontP.all : allBelow 128 FontP.ok = .true := refl Bool.true
+
+------------------------------------------------------------------------------------
+-- 3. The initialisation. The command bytes of the power-up, decoded by the SSD1306's
+--    command table (`Ssd.run`: which commands take how many argument bytes, and what
+--    each sets; written from the datasheet, independently of `Ssd.bytes`), leave no
+--    command incomplete and leave the controller as the demo needs it: display on, the
+--    charge pump on, the panel's multiplex ratio and COM pin configuration, horizontal
+--    addressing over the whole panel, the picture upright, not inverted. The same after
+--    any number of frame headers.
+
+def InitP.cmds (c : OledCfg) : List Nat := Prog.cmdsOf (Prog.init c)
+def InitP.rest (c : OledCfg) : List Nat := (Ssd.run (List.length (InitP.cmds c)) R.reset (InitP.cmds c)).2
+
+def InitP.complete32 : InitP.rest OledCfg.board32 = .nil := refl (List.nil : List Nat)
+def InitP.complete64 : InitP.rest OledCfg.board = .nil := refl (List.nil : List Nat)
+def InitP.wanted32 : Ssd.wanted 32 (Ssd.ofCmds (InitP.cmds OledCfg.board32)) = .true := refl Bool.true
+def InitP.wanted64 : Ssd.wanted 64 (Ssd.ofCmds (InitP.cmds OledCfg.board)) = .true := refl Bool.true
+-- a frame header changes nothing of that
+def InitP.header32 : Ssd.wanted 32 (Ssd.ofCmds (List.append (InitP.cmds OledCfg.board32)
+  (Prog.cmdsOf (Prog.loop OledCfg.board32)))) = .true := refl Bool.true
+def InitP.header64 : Ssd.wanted 64 (Ssd.ofCmds (List.append (InitP.cmds OledCfg.board)
+  (Prog.cmdsOf (Prog.loop OledCfg.board)))) = .true := refl Bool.true
+
+-- The order of the power-up, as the PmodOLED reference manual and the SSD1306
+-- datasheet (section 8.9, "Power ON and OFF sequence") ask: VDD first, then a wait; a
+-- RES pulse of `tVdd` cycles (at least 3 µs); the charge pump switched on after the
+-- reset; the screen cleared and the charge pump on before VBAT; VBAT, 100 ms, display
+-- on; the display on before the first frame. And the waits are long enough at 12 MHz:
+-- 1 ms after VDD, 100 ms after VBAT.
+
+def Seq.key (s : Step) : List Nat := match s with
+  | .send c => .cons 15 (Ssd.bytes c)
+  | _ => .cons (Step.code s) .nil
+
+-- the index of the first step with this key (the length if there is none)
+def Seq.find (key : List Nat) : List Step → Nat
+  | .nil => 0
+  | .cons s ss => match Hdl.natsEq (Seq.key s) key with
+    | .true => 0
+    | .false => Nat.succ (Seq.find key ss)
+
+def Seq.at (st : List Step) (s : Step) : Nat := Seq.find (Seq.key s) st
+-- the key of the step at index `i`
+def Seq.keyAt : List Step → Nat → List Nat
+  | .nil, i => .nil
+  | .cons s ss, i => match i with
+    | .zero => Seq.key s
+    | .succ j => Seq.keyAt ss j
+-- right after the first `a` comes `b`
+def Seq.next (st : List Step) (a b : Step) : Bool := Hdl.natsEq (Seq.keyAt st (Seq.at st a + 1)) (Seq.key b)
+def Seq.before (st : List Step) (a b : Step) : Bool := Nat.lt (Seq.at st a) (Seq.at st b)
+
+def Seq.ok (st : List Step) : Bool :=
+  List.all (fun (b : Bool) => b)
+    (.cons (Nat.beq (Seq.at st Step.vddOn) 0) (.cons (Seq.next st Step.vddOn Step.waitShort)
+    (.cons (Seq.next st Step.resLow Step.waitShort) (.cons (Nat.beq (Seq.at st Step.resLow + 2) (Seq.at st Step.resHigh))
+    (.cons (Seq.before st Step.resHigh (Step.send (Ssd.chargePump .true)))
+    (.cons (Seq.before st Step.blank Step.vbatOn) (.cons (Seq.before st (Step.send (Ssd.chargePump .true)) Step.vbatOn)
+    (.cons (Seq.next st Step.vbatOn Step.waitLong) (.cons (Seq.next st Step.waitLong (Step.send Ssd.displayOn))
+    (.cons (Seq.before st (Step.send Ssd.displayOn) Step.frame) (.cons (Seq.before st Step.frame (Step.pixels))
+    .nil)))))))))))
+
+def Seq.timing (c : OledCfg) : Bool := Bool.and (Nat.le 12000 c.tVdd) (Nat.le 1200000 c.tVbat)
+
+def SeqP.board32 : Seq.ok (Prog.steps OledCfg.board32) = .true := refl Bool.true
+def SeqP.board64 : Seq.ok (Prog.steps OledCfg.board) = .true := refl Bool.true
+def SeqP.timing32 : Seq.timing OledCfg.board32 = .true := refl Bool.true
+def SeqP.timing64 : Seq.timing OledCfg.board = .true := refl Bool.true
+-- (the fast configurations of the simulations keep the order and the RES pulse's 3 µs)
+def SeqP.fast32 : Seq.ok (Prog.steps Oled.fast32) = .true := refl Bool.true
+def SeqP.fastRes : Nat.le 36 (Oled.fast32).tVdd = .true := refl Bool.true

@@ -6,4 +6,5 @@ import Grail
 def package : Package := Package.new "icestick-uart"
   |> Package.lib "lib" "src"
   |> Package.exe "icestick" "app/icestick.wiz"
+  |> Package.exe "oled" "app/oled.wiz"
   |> Package.tests "tests" "tests"

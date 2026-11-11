@@ -29,6 +29,8 @@ jobs:
         run: nix develop --command grail test
       - name: Generate, simulate, synthesise, simulate the netlists
         run: nix develop --command .grail/bin/icestick all
+      - name: The OLED demo (generate with frame checks, simulate, synthesise)
+        run: nix develop --command .grail/bin/oled all
       - uses: actions/upload-artifact@v4
         with:
           name: bitstreams
@@ -38,3 +40,5 @@ jobs:
             build/*.rpt
             build/*.log
             build/icestick.pcf
+            build/*.pcf
+            build/frames/*.pbm

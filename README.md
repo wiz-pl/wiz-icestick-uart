@@ -140,6 +140,97 @@ seen within 50 µs into a mark, measures marks and spaces, and decodes NEC frame
 repeat codes; `listen` prints them. Whether a remote at 940 nm and 38 kHz gets through
 the IrDA receiver's filters is for the board to show (see the results below).
 
+## The OLED demo
+
+A demoscene-style demo on an SSD1306 OLED on the Pmod connector J2: a Digilent PmodOLED
+(128 × 32), or with the design `oled64` a 128 × 64 module on the same pins. Four effects,
+512 frames each (5.6 s), looping; each wipes in from the left over the one before:
+
+| effect | what it is |
+|---|---|
+| plasma | four sine waves (along x, along y, along the diagonal, and along y bent by the first), summed, the middle of the range stretched to 16 grey levels, ordered dithering with the 4 × 4 Bayer matrix |
+| stars | three layers of stars scrolling left at 1/2, 1 and 2 pixels a frame (parallax); the stars' rows come from a 64-entry table, read in a different order by each layer and each quarter of its 256-pixel strip |
+| scroller | `WIZ ON ICE40` in an 8 × 8 font at twice the size, scrolling left a pixel a frame, every column moved up and down by a sine wave that travels along the screen, over the stars |
+| XOR | the classic (u xor v) texture as grey levels, dithered, panning round a circle |
+
+No frame buffer and no multiplier: the pixels are computed while the frame streams to
+the display, one per clock cycle, eight into the byte the serialiser sends next, from
+sine, star, message and font tables (logic, not block RAM: FINDINGS.md G19). The frame
+rate is fixed at 12 MHz / 2^17 = 91.6 frames a second; a frame takes 1.4 ms of SPI at
+6 MHz (16 cycles a byte, 512 bytes, plus 6 command bytes).
+
+Serial port (115200 8N1, `screen /dev/ttyUSB1 115200`): `1` … `4` keeps one effect on
+the screen (plasma, stars, scroller, XOR), `0` goes back to the sequence. LEDs: LED1 …
+LED4 the effect on the screen, pulsing; LED5 (green) on once the display is.
+
+**Pins** (`Oled.pins` in `src/Icestick/OledSim.wiz`; another module or wiring is a
+change of numbers there):
+
+| PmodOLED (J1) | signal | iCEstick J2 pin | FPGA pin | port |
+|---|---|---|---|---|
+| 1 | CS | 1 | 78 | `oled_cs` |
+| 2 | SDIN (MOSI) | 2 | 79 | `oled_mosi` |
+| 4 | SCLK | 4 | 81 | `oled_sclk` |
+| 7 | D/C | 7 | 87 | `oled_dc` |
+| 8 | RES | 8 | 88 | `oled_res` |
+| 9 | VBATC (low: panel supply on) | 9 | 90 | `oled_vbatc` |
+| 10 | VDDC (low: logic supply on) | 10 | 91 | `oled_vddc` |
+
+(J2's pins 5, 11 are ground, 6, 12 3.3 V; pin 3, FPGA pin 80, is not driven.)
+
+**Power-up** (`Prog.init` in `src/Icestick/Oled.wiz`, as the PmodOLED reference manual
+and the SSD1306 datasheet ask): VDDC low, 1 ms; display off (AE); RES low for 1 ms
+(at least 3 µs), RES high, 1 ms; D5 80, A8 1F (32 rows; 3F for 64), D3 00, 40, charge
+pump on (8D 14), horizontal addressing (20 00), A1, C8 (upright), COM pins DA 02 (12 for
+64 rows), contrast 81 CF, pre-charge D9 F1, VCOMH DB 40, A4, A6; the whole panel as the
+window (21 00 7F, 22 00 03) and one frame of zeros (the screen cleared); VBATC low,
+100 ms; display on (AF). Then, every frame: CS high until the frame tick, CS low, the
+window again (six command bytes, D/C low), 512 data bytes (D/C high).
+
+**Another module.** A 128 × 64 SPI module (the common 7-pin boards: GND, VCC, D0 = SCLK,
+D1 = MOSI, RES, DC, CS) works with `oled64` on the same pins; it has its own supplies, so
+VBATC and VDDC are left unconnected. An I²C module (4 pins: GND, VCC, SCL, SDA) needs a
+different byte engine: `spiStep` is the only part that knows about SPI (the controller
+gives it a byte and D/C when it is idle), so an I²C engine with the same interface
+(address 0x3C, a control byte 0x00 or 0x40 instead of D/C) would replace it; it is not
+written.
+
+**Building and flashing.**
+
+```sh
+grail build oled            # the driver (and `grail build` checks the proofs)
+.grail/bin/oled all         # gen (values, netlist, SSD1306 model, frames), sim, bit, postsim
+.grail/bin/oled flash oled  # the PmodOLED (128 × 32); `flash oled64` for a 128 × 64 module
+.grail/bin/oled look 32 300 1100   # the effects at frame counter values, as build/look/*.pbm
+```
+
+**How it is checked.** `oled gen` runs each design on values and on its netlist (they
+must agree in every cycle) and feeds the pins to a model of the SSD1306
+(`Model` in `OledSim.wiz`: SDIN shifted in on rising SCLK edges while CS is low and RES
+high, D/C with the eighth bit, the datasheet's command table with its argument counts,
+horizontal addressing into the RAM). It checks: VDD on at least 1 ms (`tVdd`) before the
+first byte; the RES pulse at least `tVdd` and 3 µs; the command bytes exactly the
+program's; VBAT after the reset and the display on at least `tVbat` after it; the
+controller's registers as wanted (charge pump, rows, COM pins, addressing, window);
+and every frame complete (512 bytes) and equal, pixel by pixel, to the effect evaluated
+directly at the frame's time. `oled_fast` (waits of 40 and 200 cycles, a frame every
+2^14 cycles, the frame counter stepping by 197) shows ten frames across all four
+effects, the last after the host typed `3` (the scroller, whatever the time);
+`oled64_fast` six frames on 64 rows. The frames are written as PBM pictures,
+`build/frames/NAME_K_tT.pbm`. The board designs run the first 50000 cycles of the
+power-up (the 100 ms wait alone is 1.2 million cycles). Icarus Verilog replays every
+trace on the emitted Verilog and on yosys's netlist.
+
+**What is proved** (`src/Icestick/Proofs/Oled.wiz`, by the kernel): the SPI serialiser
+sends every byte as eight rising SCLK edges with SDIN the byte's bits, most significant
+first, and is idle again in the 16th cycle, from either idle state (sixteen ranges of
+sixteen bytes); `sin6` is its specification at all 64 phases; the program's memory
+gives every entry of the program, for both panels, and the program fits it; the font's
+memory gives every column; the power-up's command bytes, decoded by the datasheet's
+command table, are complete and leave the controller as wanted (and so do the frame
+headers after them); the power-up's steps are in the order the PmodOLED manual and the
+SSD1306 datasheet ask, and the waits are at least 1 ms and 100 ms at 12 MHz.
+
 ## Building
 
 You need Nix with flakes. `nix develop` gives a shell with `wiz`, `grail` (from the
@@ -337,8 +428,13 @@ src/Icestick/Ir.wiz      NEC: specification, encoder (38 kHz carrier), decoder
 src/Icestick/Blaster.wiz the IR blaster: command line, messages, the design
 src/Icestick/IrSim.wiz   the transceiver and a remote in simulation, a waveform analyser
 src/Icestick/Board.wiz   pins, the list of designs, scenarios
+src/Icestick/Oled.wiz    SSD1306: commands, power-up program, SPI serialiser, controller
+src/Icestick/Fx.wiz      the demo's effects: sine, dithering, plasma, stars, scroller, XOR
+src/Icestick/Demo.wiz    the OLED demo: effects, controller, LEDs, the key on the UART
+src/Icestick/OledSim.wiz OLED pins, designs, an SSD1306 model, reference frames, PBM
 src/Icestick/Proofs*     the proofs
 app/icestick.wiz         the flow driver and the host-side test
+app/oled.wiz             the OLED demo's flow driver
 tests/                   simulation tests for `grail test`
 ```
 
