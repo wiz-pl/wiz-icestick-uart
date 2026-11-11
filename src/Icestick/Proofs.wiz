@@ -56,28 +56,27 @@ def Baud.period (m : Nat) : Baud.ticks 104 (rounds Baud.next 104 m Baud.zero) = 
 ------------------------------------------------------------------------------------
 -- 2. Loopback: every byte sent by the transmitter is received by the receiver.
 --
--- The transmitter's line goes through the synchroniser into the receiver (`loopStep`,
--- with `n` clock cycles per bit). A byte `b` is offered in the first cycle and nothing
--- after; `Loop.received` collects the bytes the receiver reports in the first `c`
--- cycles. The statements are in `Icestick.Proofs.Loopback` (the kernel runs the
--- circuit there, which takes minutes).
+-- The transmitter's line goes through the synchroniser into the receiver (`loopback`,
+-- the three parts composed with `Circuit.seq`, with `n` clock cycles per bit). A byte `b`
+-- is offered in the first cycle and nothing after; `Loop.received` collects the bytes
+-- the receiver reports in the first `c` cycles. The statements are in
+-- `Icestick.Proofs.Loopback` (the kernel runs the circuit there, which takes minutes).
 
-def Loop.quiet : HwTy.El (HwTy.prod Bit B8) := (BitVec.ofNat 1 0, BitVec.ofNat 8 0)
-def Loop.send (b : Nat) : HwTy.El (HwTy.prod Bit B8) := (BitVec.ofNat 1 1, BitVec.ofNat 8 b)
+def Loop.quiet : HwTy.El Send.code := (BitVec.ofNat 1 0, BitVec.ofNat 8 0)
+def Loop.send (b : Nat) : HwTy.El Send.code := (BitVec.ofNat 1 1, BitVec.ofNat 8 b)
 
-def Loop.go (n : Nat) : Nat → HwTy.El LoopS → HwTy.El (HwTy.prod Bit B8) → List Nat → List Nat
+def Loop.go (n : Nat) : Nat → HwTy.El (loopback n).st → HwTy.El Send.code → List Nat → List Nat
   | .zero, s, x, acc => acc
   | .succ k, s, x, acc =>
-    let ω r : HwTy.El (HwTy.prod LoopS (HwTy.prod Bit B8)) := @loopStep HwTy.El _ n s x;
+    let ω r : HwTy.El (loopback n).st × HwTy.El Byte.code := Circuit.stepEl (loopback n) s x;
     Loop.go n k r.1 Loop.quiet (match BitVec.isTrue r.2.1 with
       | .true => List.cons (BitVec.toNat r.2.2) acc
       | .false => acc)
 
-def Loop.received (n c b : Nat) : List Nat :=
-  Loop.go n c (TxS.init, (SyncS.init, RxS.init)) (Loop.send b) .nil
+def Loop.received (n c b : Nat) : List Nat := Loop.go n c (loopback n).init (Loop.send b) .nil
 
 -- exactly one byte arrives, and it is `b`
-def Loop.ok (n c b : Nat) : Bool := NatList.beq (Loop.received n c b) (.cons b .nil)
+def Loop.ok (n c b : Nat) : Bool := Hdl.natsEq (Loop.received n c b) (.cons b .nil)
 
 -- "for every k below n", as a computation, and what it means
 def allBelow : Nat → (Nat → Bool) → Bool
@@ -107,3 +106,11 @@ def Loop.at8 (base k : Nat) : Bool := Loop.ok 8 90 (base + k)
 def Loop.inRange (base : Nat) (h : allBelow 16 (Loop.at8 base) = .true)
     (k : Nat) (hk : Nat.lt k 16 = .true) : Loop.at8 base k = .true :=
   allBelow_spec k 16 (Loop.at8 base) h hk
+
+-- The loopback is the three parts in sequence, for any input trace: what the receiver
+-- reports is its own simulation on the synchroniser's on the transmitter's
+-- (`Circuit.run_seq`, twice).
+def Loop.parts (n : Nat) (xs : List (HwTy.El Send.code)) :
+    Circuit.run (loopback n) xs = Circuit.run (rxC n) (Circuit.run syncC (Circuit.run (txC n) xs)) :=
+  Eq.trans (Circuit.run_seq (txC n) (Circuit.seq syncC (rxC n)) xs)
+    (Circuit.run_seq syncC (rxC n) (Circuit.run (txC n) xs))

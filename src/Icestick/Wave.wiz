@@ -35,7 +35,7 @@ inductive Ev where
   | idle (cycles : Nat)
 
 def Wave.eventsGo (num den : Nat) : List Ev → Nat → List Nat → List Nat
-  | .nil, t, acc => List.reverseAux acc .nil
+  | .nil, t, acc => Hdl.rev acc .nil
   | .cons e es, t, acc => match e with
     | .byte b =>
       let ω r := Wave.levels num den (Wave.frame b) t acc;
@@ -49,7 +49,7 @@ def Wave.events (num den : Nat) (es : List Ev) : List Nat := Wave.eventsGo num d
 -- at that cycle; the line is sampled 1.5, 2.5, … 9.5 bit periods later. A frame whose
 -- stop bit is low is reported as 256 + the byte.
 def Wave.decodeGo (num den : Nat) : List Nat → Nat → Bool → Nat → Nat → Nat → List Nat → List Nat
-  | .nil, c, busy, next, k, val, acc => List.reverseAux acc .nil
+  | .nil, c, busy, next, k, val, acc => Hdl.rev acc .nil
   | .cons v vs, c, .false, next, k, val, acc => (match Nat.beq v 0 with
     | .true => Wave.decodeGo num den vs (c + 1) .true (c * den + num + Nat.div num 2) 0 0 acc
     | .false => Wave.decodeGo num den vs (c + 1) .false next k val acc)
@@ -66,20 +66,16 @@ def Wave.decode (num den : Nat) (line : List Nat) : List Nat :=
   Wave.decodeGo num den line 0 .false 0 0 0 .nil
 
 ------------------------------------------------------------------------------------
--- Running a circuit on bus encodings, with an accumulator (`Circuit.run` is not tail
--- recursive, and these traces are hundreds of thousands of cycles long).
+-- Running a circuit on bus encodings (`Circuit.run` is tail recursive since H14 S1).
 
-def Sim.go {ω i o : HwTy} (c : Circuit i o) : HwTy.El c.st → List Nat → List Nat → List Nat
-  | s, .nil, acc => List.reverseAux acc .nil
-  | s, .cons x xs, acc =>
-    let ω r : HwTy.El c.st × HwTy.El o := Circuit.stepEl c s (HwTy.unpack i x);
-    Sim.go c r.1 xs (List.cons (HwTy.pack o r.2) acc)
+-- from the state `s` (the initial state: `Sim.run`)
+def Sim.go {ω i o : HwTy} (c : Circuit i o) (s : HwTy.El c.st) (xs : List Nat) : List Nat :=
+  Hdl.map (HwTy.pack o) (Circuit.runAcc c s (Hdl.map (HwTy.unpack i) xs) .nil)
+def Sim.run {ω i o : HwTy} (c : Circuit i o) (xs : List Nat) : List Nat := Circuit.runPacked c xs
 
-def Sim.run {ω i o : HwTy} (c : Circuit i o) (xs : List Nat) : List Nat := Sim.go c c.init xs .nil
-
--- bit 0 of each output: the TX line of a board design
-def Sim.txLine (ys : List Nat) : List Nat := List.map (fun (y : Nat) => Nat.mod y 2) ys
-def Sim.leds (ys : List Nat) : List Nat := List.map (fun (y : Nat) => Nat.div y 2) ys
+-- a board design's output bus (`Board.code`): the TX line on top of the five LEDs
+def Sim.txLine (ys : List Nat) : List Nat := Hdl.map (fun (y : Nat) => Nat.div y 32) ys
+def Sim.leds (ys : List Nat) : List Nat := Hdl.map (fun (y : Nat) => Nat.mod y 32) ys
 
 def NatList.last : Nat → List Nat → Nat
   | d, .nil => d

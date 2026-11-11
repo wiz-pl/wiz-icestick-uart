@@ -22,12 +22,15 @@ src/Icestick/*.wiz ── grail build ──▶ .grail/bin/icestick      (the fl
 Lattice iCEstick: an iCE40HX1K in a TQ144 package, a 12 MHz oscillator, five LEDs and
 an FT2232H whose second channel is a serial port.
 
-| signal | FPGA pin | in the design |
+| signal | FPGA pin | port |
 |---|---|---|
 | 12 MHz clock | 21 | `clk` |
-| UART RX (host → FPGA) | 9 | `x` |
-| UART TX (FPGA → host) | 8 | `y[0]` |
-| LED1 … LED4 (red), LED5 (green) | 99, 98, 97, 96, 95 | `y[1]` … `y[5]` |
+| UART RX (host → FPGA) | 9 | `uart_rx` |
+| UART TX (FPGA → host) | 8 | `uart_tx` |
+| LED1 … LED4 (red), LED5 (green) | 99, 98, 97, 96, 95 | `leds[0]` … `leds[4]` |
+
+The ports come from the bundles `Pins` and `Board` (`src/Icestick/Gates.wiz`), and
+`build/icestick.pcf` is generated from them (`Pcf.emit`, checked by `Pcf.check`).
 
 (Pin numbers from icestorm's `examples/icestick/icestick.pcf`. The clock and the two
 UART pins are confirmed by the board answering.)
@@ -37,16 +40,18 @@ divides its clock by 104: 115384.6 baud, 0.16 % fast.
 
 ## The designs
 
-All four are `Circuit Bit B6` values in `src/Icestick/Designs.wiz` (one input bit, six
-output bits, one Mealy machine each), built from the same parts in
-`src/Icestick/Uart.wiz` (baud divider, transmitter, receiver, input synchroniser).
+All four are `Circuit Pins.code Board.code` values in `src/Icestick/Designs.wiz` (one
+Mealy machine each, state, input and output as bundles, i.e. structures of signals with
+`deriving Bundle`), built from the same parts in `src/Icestick/Uart.wiz` (baud divider,
+transmitter, receiver, input synchroniser). Every register is named after its field
+(`tx_cnt`, `rx_ph`, `crc`, …) in the Verilog.
 
 | design | what it does | logic cells (of 1280) | Fmax (nextpnr) |
 |---|---|---|---|
-| `blinky` | a 24-bit counter on the LEDs; LED5 blinks at 0.72 Hz | 27 | 194 MHz |
-| `hello` | sends `Hello from Wiz!\r\n`, waits 0.35 s, again | 105 | 130 MHz |
-| `echo` | sends back every byte it receives | 78 | 170 MHz |
-| `proto` | a CRC service: see below | 125 | 164 MHz |
+| `blinky` | a 24-bit counter on the LEDs; LED5 blinks at 0.72 Hz | 27 | 209 MHz |
+| `hello` | sends `Hello from Wiz!\r\n`, waits 0.35 s, again | 105 | 140 MHz |
+| `echo` | sends back every byte it receives | 79 | 216 MHz |
+| `proto` | a CRC service: see below | 125 | 191 MHz |
 
 The clock is 12 MHz, so timing is not a concern.
 
@@ -75,7 +80,12 @@ that grail's cache answers. Without the Cachix cache of the Wiz project as a tru
 substituter, Nix also builds wiz from source the first time (a few minutes).
 
 With tower, Wiz's toolchain manager, instead of the flake's `wiz`: `wiz-toolchain`
-names the commit this repository is developed against, so tower's `wiz` and `grail`
+names the commit this repository is developed against (master bc84b49 or later: the HDL
+library's named ports, bundles and emitters, Wiz PR #91; until tower can install a
+commit, it installs only tags and `nightly` from release tarballs, so
+`tower override set nightly` in this directory is the way to get it; on this branch the
+flake's own `wiz` (still fe4e9c4 in `flake.lock`) is too old, and the devShell is only
+for yosys, nextpnr, icestorm and iverilog), so tower's `wiz` and `grail`
 shims pick it up in this directory (`tower show`; see the Wiz documentation, stage 26).
 You then need yosys, nextpnr-ice40, icestorm, iverilog and a C compiler with GMP from
 somewhere else. Tried here as far as `tower toolchain install` from the file's spec and
@@ -122,6 +132,9 @@ head -c 4096 /dev/urandom > r.bin; (timeout 4 cat $P > e.bin &); sleep 0.5; cat 
 
 ### Results on a real iCEstick (2026-11-11)
 
+(With the designs as of wiz fe4e9c4, on `master`. The `wiz-nightly` branch, ported to the
+named-port API, has been simulated and synthesised but not run on the board.)
+
 | design | check | result |
 |---|---|---|
 | `blinky` | flashed and verified by iceprog; the UART stays silent | 0 bytes in 2 s (the LEDs were not looked at) |
@@ -155,7 +168,7 @@ One description of each design; four things run it, and they must agree.
    compared with what the design must send (for `proto`, the CRC specification on
    numbers, `Crc.reply`).
 2. **The netlist** (`Circuit` at the representation `Wire`): the netlist interpreter of
-   the HDL library replays the first 6000 cycles and must give the same outputs.
+   the HDL library replays the whole trace and must give the same outputs.
 3. **The Verilog**: Icarus Verilog replays the whole trace on the emitted module
    (`icestick sim`) and on yosys's synthesised netlist with the iCE40 cell models
    (`icestick postsim`): the output must match the values of (1) in every cycle
@@ -202,7 +215,7 @@ src/Icestick/Uart.wiz    baud divider, transmitter, receiver, synchroniser
 src/Icestick/Crc.wiz     CRC-8 as hardware and as a specification
 src/Icestick/Designs.wiz blinky, hello, echo, proto; the loopback circuit
 src/Icestick/Wave.wiz    waveforms, a software receiver, the simulator loop, test data
-src/Icestick/Board.wiz   pins, the Verilog emitter, test bench and trace files, scenarios
+src/Icestick/Board.wiz   pins, the list of designs, scenarios
 src/Icestick/Proofs*     the proofs
 app/icestick.wiz         the flow driver and the host-side test
 tests/                   simulation tests for `grail test`
@@ -210,7 +223,7 @@ tests/                   simulation tests for `grail test`
 
 ## Versions
 
-wiz and grail `fe4e9c4` (2026-11-10), yosys 0.70, nextpnr 0.11.1, icestorm
+wiz and grail `bc84b49` (2026-11-11; developed against tower's `nightly`, 5e8bbb2), yosys 0.70, nextpnr 0.11.1, icestorm
 2025-06-03, Icarus Verilog 13.0, from nixpkgs `02c087f` (the Wiz flake's pin).
 
 ## Licence

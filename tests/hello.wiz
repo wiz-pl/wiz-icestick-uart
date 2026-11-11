@@ -16,9 +16,9 @@ def twice : List Nat :=
 -- the LEDs after 2^19 + 5 cycles of a counter that starts at 2^24 - 2^19 (so that the
 -- test does not need half a million cycles): the counter has wrapped to 5
 def blinkyFrom (start cycles : Nat) : Nat :=
-  NatList.last 0 (Sim.leds (Sim.go blinky (BitVec.ofNat 24 start) (Wave.rep cycles 1 .nil) .nil))
+  NatList.last 0 (Sim.leds (Sim.go blinky (BitVec.ofNat 24 start) (Wave.rep cycles 1 .nil)))
 
 def main : IO Unit := do
   IO.println (showBytes twice);
-  IO.println ("leds after 5 cycles from 0x0FFFFE: " <+> Nat.show (blinkyFrom 1048574 5));
-  IO.println ("leds after 5 cycles from 0xF7FFFE: " <+> Nat.show (blinkyFrom 16252926 5))
+  IO.println ("leds after 5 cycles from 0x0FFFFE: " <+> Hdl.show (blinkyFrom 1048574 5));
+  IO.println ("leds after 5 cycles from 0xF7FFFE: " <+> Hdl.show (blinkyFrom 16252926 5))

@@ -10,4 +10,4 @@ def count : Nat → Nat → Nat
   | .succ b, acc => count b (acc + Nat.ofBool (Loop.ok clocksPerBit 1100 b))
 
 def main : IO Unit :=
-  IO.println ("loopback at 104 cycles per bit: " <+> Nat.show (count 256 0) <+> " of 256 bytes received intact")
+  IO.println ("loopback at 104 cycles per bit: " <+> Hdl.show (count 256 0) <+> " of 256 bytes received intact")

@@ -48,7 +48,7 @@ def String.codes (s : String) : List Nat := Chars.codes (String.chars s)
 
 def showBytes : List Nat → String
   | .nil => ""
-  | .cons x xs => Nat.show x <+> " " <+> showBytes xs
+  | .cons x xs => Hdl.show x <+> " " <+> showBytes xs
 
 def unwords : List String → String
   | .nil => ""
@@ -87,59 +87,62 @@ def ensureDir (p : String) : EIO Unit := do
 
 def build (file : String) : String := "build/" <+> file
 
--- the trace file, a piece at a time
-def writeVec (path : String) : Nat → List Nat → List Nat → EIO Unit
-  | .zero, _, _ => EIO.pure ()
-  | .succ fuel, xs, ys => match xs with
-    | .nil => EIO.pure ()
-    | .cons _ _ =>
-      let ω r := Vec.chunk 4096 xs ys .nil;
-      EIO.bind (FS.appendFile path (String.mk r.1)) (fun u => writeVec path fuel r.2.1 r.2.2)
-
--- the netlist's own simulation, with an accumulator
-def NetSim.go (n : Netlist) : List Nat → List Nat → List Nat → List Nat
-  | regs, .nil, acc => List.reverseAux acc .nil
-  | regs, .cons x xs, acc =>
-    let ω vals := Netlist.evalNodes (List.cons x List.nil) regs n.nodes List.nil List.nil;
-    NetSim.go n (List.map (Reg.read vals) n.regs) xs
-      (List.cons (List.nthD 0 (List.map (Port.read vals) n.outputs) 0) acc)
-def NetSim.run (n : Netlist) (xs : List Nat) : List Nat :=
-  NetSim.go n (List.map (fun (r : Reg) => r.init) n.regs) xs .nil
-
 def List.take {A : Type} : Nat → List A → List A
   | .zero, _ => .nil
   | .succ k, .nil => .nil
   | .succ k, .cons x xs => .cons x (List.take k xs)
 
+-- the vector file, 4096 lines at a time
+def takeDrop {A : Type} : Nat → List A → List A → List A × List A
+  | .zero, xs, acc => (Hdl.reverse acc, xs)
+  | .succ k, .nil, acc => (Hdl.reverse acc, .nil)
+  | .succ k, .cons x xs, acc => takeDrop k xs (.cons x acc)
+def writeVec (path : String) : Nat → List String → EIO Unit
+  | .zero, _ => EIO.pure ()
+  | .succ fuel, ls => match ls with
+    | .nil => EIO.pure ()
+    | .cons _ _ =>
+      let ω r := takeDrop 4096 ls .nil;
+      EIO.bind (FS.appendFile path (Hdl.concat r.1)) (fun u => writeVec path fuel r.2)
+
+def leavesEq : List (List Nat) → List (List Nat) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
+  | _, _ => .false
+
 def check (what : String) (ok : Bool) : EIO Unit := match ok with
   | .true => say ("  ok: " <+> what)
   | .false => EIO.fail ("FAILED: " <+> what)
 
--- cycles of each trace that the netlist interpreter replays (it is quadratic in the
--- number of nodes; the Verilog simulators replay everything)
-def netlistCycles : Nat := 6000
-
 def genDesign (d : Design) : EIO Unit := do
-  let name := Design.name d;
-  let xs := Design.input d;
+  let name := d.name;
+  let xs := Top.input name;
+  let ins := Hdl.map (fun (b : Nat) => List.cons b List.nil) xs;
   let net := Design.netlist d;
-  say (name <+> ": " <+> Nat.show (Netlist.size net) <+> " netlist nodes, "
-    <+> Nat.show (List.length xs) <+> " cycles");
-  let ys := Sim.run (Design.circuit d) xs;
-  let got := Wave.decode clocksPerBit 1 (Sim.txLine ys);
-  check ("value simulation sends the expected " <+> Nat.show (List.length (Design.expect d)) <+> " bytes")
-    (NatList.beq got (Design.expect d));
-  check ("netlist simulation = value simulation (first " <+> Nat.show netlistCycles <+> " cycles)")
-    (NatList.beq (NetSim.run net (List.take netlistCycles xs)) (List.take netlistCycles ys));
-  FS.writeFile (build (name <+> ".v")) (Design.verilog d);
-  FS.writeFile (build (name <+> "_tb.v")) (Board.testbench name (build (name <+> ".vec")) (List.length xs));
+  say (name <+> ": " <+> Hdl.show (Netlist.size net) <+> " netlist nodes, "
+    <+> Hdl.show (List.length net.regs) <+> " registers, " <+> Hdl.show (List.length xs) <+> " cycles");
+  let ys := Design.runLeaves d ins;
+  -- the first output port is `uart_tx`
+  let got := Wave.decode clocksPerBit 1 (Hdl.map (fun (y : List Nat) => Hdl.nthD 0 y 0) ys);
+  check ("value simulation sends the expected " <+> Hdl.show (List.length (Top.expect name)) <+> " bytes")
+    (Hdl.natsEq got (Top.expect name));
+  check ("netlist simulation = value simulation (all cycles)") (leavesEq (Netlist.simulate net ins) ys);
+  FS.writeFile (build (name <+> ".v")) (Verilog.emit net);
+  FS.writeFile (build (name <+> "_tb.v")) (Testbench.verilog net (build (name <+> ".vec")) (List.length xs));
   FS.writeFile (build (name <+> ".vec")) "";
-  writeVec (build (name <+> ".vec")) (List.length xs) xs ys
+  writeVec (build (name <+> ".vec")) (List.length xs) (Testbench.lines net ins ys)
 
 def gen : EIO Unit := do
   ensureDir "build";
-  FS.writeFile (build "icestick.pcf") Board.pcf;
-  EIO.forEach genDesign Design.all
+  let net := Design.netlist (Circuit.design "proto" (proto clocksPerBit));
+  check "every port has its pins" (match Pcf.check net Board.pins with
+    | .nil => .true
+    | _ => .false);
+  FS.writeFile (build "icestick.pcf") (Pcf.emit net Board.clk Board.pins);
+  -- a waveform of the first reply of `proto` (every port and register)
+  FS.writeFile (build "proto.vcd") (Vcd.ofRun "proto" (proto clocksPerBit)
+    (Hdl.map (fun (b : Nat) => HwTy.unpack Pins.code b) (List.take 6000 (Top.input "proto"))));
+  EIO.forEach genDesign Top.designs
 
 -- replay a trace on Verilog sources with Icarus Verilog
 def replay (std label name : String) (sources : List String) : EIO Unit := do
@@ -151,7 +154,7 @@ def replay (std label name : String) (sources : List String) : EIO Unit := do
     (String.contains out ("PASS " <+> name))
 
 def simDesign (d : Design) : EIO Unit :=
-  replay "-g2005" "" (Design.name d) (.cons (build (Design.name d <+> ".v")) .nil)
+  replay "-g2005" "" d.name (.cons (build (Design.name d <+> ".v")) .nil)
 
 def bitDesign (d : Design) : EIO Unit := do
   let name := Design.name d;
@@ -180,7 +183,7 @@ def postsimDesign (cells : String) (d : Design) : EIO Unit :=
 
 def postsim : EIO Unit := do
   dat ← toolOutput "yosys-config" (.cons "--datdir" .nil);
-  EIO.forEach (postsimDesign (String.mk (Chars.trim (String.chars dat)) <+> "/ice40/cells_sim.v")) Design.all
+  EIO.forEach (postsimDesign (String.mk (Chars.trim (String.chars dat)) <+> "/ice40/cells_sim.v")) Top.designs
 
 ------------------------------------------------------------------------------------
 -- The serial port
@@ -193,7 +196,7 @@ def defaultPort : String := "/dev/ttyUSB1"
 def setupPort (port : String) (tenths : Nat) : EIO Unit :=
   tool "stty" (.cons "-F" (.cons port (.cons "115200" (.cons "raw" (.cons "-echo" (.cons "cs8"
     (.cons "-cstopb" (.cons "-parenb" (.cons "clocal" (.cons "min" (.cons "0" (.cons "time"
-    (.cons (Nat.show tenths) .nil)))))))))))))
+    (.cons (Hdl.show tenths) .nil)))))))))))))
 
 -- send a line, read the answer (`none`: nothing came within the time limit)
 def exchange (rd wr : File) (line : List Nat) : EIO (Option String) := do
@@ -210,11 +213,11 @@ def testLines (rd wr : File) : Nat → Nat → List (List Nat) → EIO Nat
     r ← exchange rd wr l;
     let want := expectReply l;
     match r with
-    | .none => EIO.fail ("FAIL: line " <+> Nat.show k <+> ": no answer in time (expected " <+> want <+> ")")
+    | .none => EIO.fail ("FAIL: line " <+> Hdl.show k <+> ": no answer in time (expected " <+> want <+> ")")
     | .some got => match String.eq got want with
       | .true => testLines rd wr (k + 1) bad ls
       | .false => do
-        say ("  line " <+> Nat.show k <+> " (" <+> Nat.show (List.length l) <+> " bytes): got \""
+        say ("  line " <+> Hdl.show k <+> " (" <+> Hdl.show (List.length l) <+> " bytes): got \""
           <+> got <+> "\", expected \"" <+> want <+> "\"");
         testLines rd wr (k + 1) (bad + 1) ls
 
@@ -248,8 +251,8 @@ def test (port : String) (count tenths : Nat) : EIO Unit := do
   File.close rd;
   File.close wr;
   match Nat.beq bad 0 with
-  | .true => say ("PASS: " <+> Nat.show (List.length hardwareLines + 1) <+> " lines, every CRC as expected")
-  | .false => EIO.fail ("FAIL: " <+> Nat.show bad <+> " wrong answers")
+  | .true => say ("PASS: " <+> Hdl.show (List.length hardwareLines + 1) <+> " lines, every CRC as expected")
+  | .false => EIO.fail ("FAIL: " <+> Hdl.show bad <+> " wrong answers")
 
 -- A stand-in for the board: each line read from the port goes through the simulated
 -- `proto` circuit as a waveform, and the bytes its TX line carries are written back.
@@ -279,8 +282,8 @@ def fake (port : String) : EIO Unit := do
 def usage : String :=
   "usage: icestick gen | sim | bit | postsim | all | flash NAME | test [PORT [LINES [TENTHS]]] | fake PORT"
 
-def sim : EIO Unit := EIO.forEach simDesign Design.all
-def bit : EIO Unit := EIO.forEach bitDesign Design.all
+def sim : EIO Unit := EIO.forEach simDesign Top.designs
+def bit : EIO Unit := EIO.forEach bitDesign Top.designs
 
 def run : List String → EIO Unit
   | .cons cmd rest => (match String.eq cmd "gen", String.eq cmd "sim", String.eq cmd "bit", String.eq cmd "postsim" with

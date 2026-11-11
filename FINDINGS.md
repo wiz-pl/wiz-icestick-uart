@@ -10,6 +10,17 @@ minimal reproducer, and what the project does instead. Severity:
 
 Everything not written in Wiz is listed at the end.
 
+**Since then (branch `wiz-nightly`, wiz bc84b49):** Wiz PR #91 (the HDL library's stage
+H14 S1) addresses G1 (named ports: `uart_rx`, `uart_tx`, `leds`), G2 (one register per
+field, named; wire names by `Hw.label`), G3 (bundles with `deriving Bundle`, `Circuit.seq`
+and friends: the loopback is `seq tx (seq sync rx)`), G5 (`Circuit.withReset`,
+`withEnable`), G6 (`Circuit.run` is tail recursive, the netlist interpreter O(n log n):
+every trace is replayed in full), G7 (test bench, vector, VCD and PCF emitters in the
+library), G8 (`Circuit.design : Design`, a `Type`: the designs are a `List Design`) and G9
+(the helpers are `Hdl.*`); PR #81 fixed B1 and B2, so the local Verilog emitter is gone.
+G4 and G10 remain (numerals at hardware types; a literal as first argument of `Hw.cat`).
+The text below describes the state at fe4e9c4.
+
 ## Bugs
 
 ### B1. Verilog: use before declaration (HDL library)

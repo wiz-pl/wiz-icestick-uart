@@ -25,6 +25,6 @@ def digits : List Nat :=
   .cons 49 (.cons 50 (.cons 51 (.cons 52 (.cons 53 (.cons 54 (.cons 55 (.cons 56 (.cons 57 .nil))))))))
 
 def main : IO Unit := do
-  IO.println ("crcStep = Crc.step on " <+> Nat.show (agree 256 0) <+> " of 65536 inputs");
-  IO.println ("hexDigit = Crc.hex on " <+> Nat.show (hexAgree 16 0) <+> " of 16 inputs");
-  IO.println ("CRC-8 of \"123456789\": " <+> Nat.show (Crc.ofList 0 digits) <+> " (0xF4 = 244)")
+  IO.println ("crcStep = Crc.step on " <+> Hdl.show (agree 256 0) <+> " of 65536 inputs");
+  IO.println ("hexDigit = Crc.hex on " <+> Hdl.show (hexAgree 16 0) <+> " of 16 inputs");
+  IO.println ("CRC-8 of \"123456789\": " <+> Hdl.show (Crc.ofList 0 digits) <+> " (0xF4 = 244)")

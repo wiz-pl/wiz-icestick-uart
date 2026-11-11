@@ -10,7 +10,7 @@ import IO
 def lines : List (List Nat) := Gen.lines Gen.anyByte 10 8 5
 
 def ok (num : Nat) : Bool :=
-  NatList.beq
+  Hdl.natsEq
     (Wave.decode clocksPerBit 1 (Sim.txLine (Sim.run (proto clocksPerBit)
       (Wave.events num 1000 (.cons (Ev.idle 30) (Proto.events 3600 lines))))))
     (Proto.replies lines)
@@ -20,7 +20,7 @@ def verdict (b : Bool) : String := match b with
   | .false => "wrong answers"
 
 def report (label : String) (num : Nat) : IO Unit :=
-  IO.println ("host bit = " <+> Nat.show num <+> "/1000 cycles (" <+> label <+> "): " <+> verdict (ok num))
+  IO.println ("host bit = " <+> Hdl.show num <+> "/1000 cycles (" <+> label <+> "): " <+> verdict (ok num))
 
 def main : IO Unit := do
   report "115200 baud exactly, board 0.16 % fast" 104167;
