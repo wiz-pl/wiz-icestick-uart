@@ -375,6 +375,12 @@ size t) ts)`) it is linear. Compiled code and `#eval` are not affected: the asse
 every proof that ran a program of 18 or more instructions went over 5 GB. Here:
 `Asm.labels` in the linear form (`Asm.here`, `Asm.size`).
 
+### C8. A test without `-- test: run` fails without saying why (papercut, grail)
+
+`tests/cpu.wiz` without the directive line was reported as `✗ tests/cpu.wiz` with
+"expected: (the first line of cpu.expected), actual: (nothing)": nothing was checked,
+compiled or run, and nothing said that the directive was missing.
+
 ## Not verified
 
 * **The pin numbers** are those of icestorm's `examples/icestick/icestick.pcf`

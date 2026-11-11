@@ -1,3 +1,4 @@
+-- test: run
 import Icestick.Proofs
 import Icestick.Board
 import IO

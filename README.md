@@ -152,6 +152,7 @@ named-port API, has been simulated and synthesised but not run on the board.)
 | `proto` | `123456789` by hand | `F4` |
 | `cpu_hi` | `timeout 2 cat` (branch `toy-cpu`) | `hi\r\n` twenty times in 2 s |
 | `cpu_echo` | the 256 byte values four times, back to back | each byte back plus one: identical to the expectation |
+| `cpu_count` | flashed, looked at | the LEDs count (seen by the user) |
 
 ### Without a board
 

@@ -53,7 +53,8 @@ waiting replaces it (a one-byte buffer).
   instruction and one write port; with a 4-bit opcode an 8-bit operand fits in 12
   bits, enough for any byte constant and any of 256 addresses.
 * **Eight bytes of memory** are enough for three nested loop counters and some
-  variables; they are 64 flip-flops and two 8-way multiplexers. The address is the low
+  variables; they are 64 flip-flops, one 8-way read multiplexer and eight write
+  enables. The address is the low
   three bits of the operand, so the encoding has room to grow.
 * **`nand`** is the one logic instruction: with `ldi 255` and `add`/`sub` it gives
   `not`, `and`, `or`, `xor` (a few instructions each). `sub` is there because a
@@ -108,11 +109,15 @@ In `src/Icestick/Proofs/Cpu.wiz` and `CpuProgs.wiz`, checked by the kernel on `g
   and every state of the UART (transmitter ready or not, a byte waiting or not, any
   byte), one cycle of `coreStep` at values gives exactly the next state and the action
   of `Spec.exec` on the decoded instruction, a stall included.
-* **The ROM holds the program** (`Cpu.rom_echo`, `Cpu.rom_hi`): for `echo` and `hi`, the instruction `fetch` reads at each of the 256 addresses is
-  `Spec.fetch` of the assembled program (an exhaustive check, by evaluation).
+* **The ROM holds the program** (`Cpu.rom_echo`, `Cpu.rom_hi`): for `echo` and `hi`,
+  the instruction `fetch` reads at each of the 256 addresses is `Spec.fetch` of the
+  assembled program (an exhaustive check, by evaluation; a few minutes of kernel time
+  each, so `count` is left to the simulations).
 * **Programs**: the countdown from k halts with A = 0 after 3k + 2 steps, for every k
-  below 32 (`Cpu.countdown_00`, `_10`; the test runs all 256); `hi` sends `hi\r\n` (`Cpu.hi_sends`); `echo+1`
-  answers `a b c` with `b c d` (`Cpu.echo_abc`).
+  below 32 (`Cpu.countdown_00`, `Cpu.countdown_10`; `tests/cpu.wiz` runs all 256,
+  compiled); `hi` sends `hi\r\n` (`Cpu.hi_sends`); `echo+1` answers `a b c` with
+  `b c d` (`Cpu.echo_abc`). The countdown program is the assembler's output for every k
+  (`Cpu.countdown_asm`, with k symbolic).
 
 ### How the proof works
 
@@ -185,8 +190,8 @@ On the iCEstick (2026-11-11):
 |---|---|---|
 | `cpu_hi` | `timeout 2 cat` | `hi\r\n` twenty times in 2 s (80 bytes, nothing else) |
 | `cpu_echo` | `printf abc` | `bcd` |
-| `cpu_echo` | the 256 byte values four times, back to back (1024 bytes) | 1024 bytes back, each the byte sent plus one (mod 256): `cmp` identical |
-| `cpu_count` | flashed and verified | the UART stays silent (0 bytes in 2 s); the LEDs were not looked at |
+| `cpu_echo` | the 256 byte values four times, back to back (1024 bytes, with `cat`) | 1024 bytes back, each the byte sent plus one (mod 256): `cmp` identical |
+| `cpu_count` | flashed and verified; the UART stays silent (0 bytes in 2 s) | the LEDs count (seen by the user) |
 
 ## Trying it
 
