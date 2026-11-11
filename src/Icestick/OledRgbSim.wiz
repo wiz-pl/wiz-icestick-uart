@@ -1,0 +1,30 @@
+import Icestick.DemoRgb
+import Icestick.OledSim
+-- The colour demo in simulation: pins and designs.
+
+-- Pmod J2 as the PmodOLEDrgb's J1 (reference manual, table 1): 1 CS, 2 MOSI, 3 NC,
+-- 4 SCK, 7 D/C, 8 RES, 9 VCCEN, 10 PMODEN.
+def OledRgb.pins : List Pin :=
+  .cons (Pin.one "uart_rx" 9) (.cons (Pin.one "uart_tx" 8)
+  (.cons (Pin.bus "leds" (.cons 99 (.cons 98 (.cons 97 (.cons 96 (.cons 95 .nil))))))
+  (.cons (Pin.one "oled_cs" 78)      -- J2 pin 1
+  (.cons (Pin.one "oled_mosi" 79)    -- J2 pin 2
+  (.cons (Pin.one "oled_sclk" 81)    -- J2 pin 4
+  (.cons (Pin.one "oled_dc" 87)      -- J2 pin 7
+  (.cons (Pin.one "oled_res" 88)     -- J2 pin 8
+  (.cons (Pin.one "oled_vccen" 90)   -- J2 pin 9
+  (.cons (Pin.one "oled_pmoden" 91)  -- J2 pin 10
+  .nil)))))))))
+
+-- `oledrgb` for the board; `oledrgb_fast` with short waits and frames back to back,
+-- the frame counter stepping by 539 (frames 1 … 4: every effect, two of them wiping in)
+def OledRgb.fast : RgbCfg := RgbCfg.fast 0 539
+
+def OledRgb.designs : List Design :=
+  .cons (Circuit.design "oledrgb" (demoRgb RgbCfg.board Oled.bit))
+  (.cons (Circuit.design "oledrgb_fast" (demoRgb OledRgb.fast Oled.bit)) .nil)
+
+def OledRgb.isRgb (name : String) : Bool := String.startsWith name "oledrgb"
+def OledRgb.cfgOf (name : String) : RgbCfg := match Hdl.strEq name "oledrgb" with
+  | .true => RgbCfg.board
+  | .false => OledRgb.fast

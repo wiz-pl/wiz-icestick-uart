@@ -1,0 +1,85 @@
+import Icestick.Fx
+import Icestick.OledRgb
+-- The effects in colour, for the SSD1331 (96 × 64, RGB 565). The same four, with the
+-- same building blocks as `Icestick.Fx`; each gives, per pixel, a shade (`Px`: black,
+-- a palette colour, the same at half brightness, or white) and a palette index, and one
+-- palette turns the shade of the pixel on the screen into its colour (so the wipe
+-- between two effects costs a multiplexer, not a second palette).
+--
+-- The palette is a rainbow: red, green and blue are three sines a third of a period
+-- apart (64 entries).
+--
+--  0. plasma: the sum of the four sines (as on the monochrome panel), cycling through
+--     the palette;
+--  1. stars: three layers, the far one dim and coloured, the middle one coloured, the
+--     near one white;
+--  2. scroller: "WIZ ON ICE40" in rainbow colours that run along the text, over the stars;
+--  3. XOR: (u xor v) through the palette, alternate bands at half brightness.
+
+structure Px (r : HwTy → Type) where
+  shade : r D2      -- 0 black, 1 palette, 2 palette at half, 3 white
+  idx : r D6
+
+def Px.black {r : HwTy → Type} [Hw r] : Px r := Px.mk (Hw.lit 2 0) (Hw.lit 6 0)
+
+def Px.mux {r : HwTy → Type} [Hw r] (c : r Bit) (a b : Px r) : Px r :=
+  Px.mk (Hw.mux c a.shade b.shade) (Hw.mux c a.idx b.idx)
+
+-- 565: red 5 bits, green 6, blue 5
+def rgb565 {r : HwTy → Type} [Hw r] (red : r D5) (green : r D6) (blue : r D5) : r (HwTy.bits 16) :=
+  Hw.cat red (Hw.cat green blue)
+
+def palette {r : HwTy → Type} [Hw r] (p : Px r) : r (HwTy.bits 16) :=
+  let red := sin6 p.idx;
+  let green := sin6 (Hw.add p.idx (Hw.lit 6 21));
+  let blue := sin6 (Hw.add p.idx (Hw.lit 6 43));
+  let half := eqLit p.shade 2;
+  let sh := fun (v : r D5) => Hw.mux half (Hw.cat lo (Hw.slice 1 4 v)) v;
+  let full := rgb565 (sh red) (Hw.cat (sh green) (Hw.slice 4 1 (sh green))) (sh blue);
+  Hw.mux (eqLit p.shade 0) (Hw.lit 16 0) (Hw.mux (eqLit p.shade 3) (Hw.lit 16 65535) full)
+
+------------------------------------------------------------------------------------
+
+def plasmaRgb {r : HwTy → Type} [Hw r] (x : r D7) (y : r D6) (t : r D9) : Px r :=
+  let tt := Hw.slice 0 6 t;
+  let a := sin6 (Hw.add (Hw.slice 1 6 x) tt);
+  let b := sin6 (Hw.add y (Hw.cat (Hw.slice 0 5 t) lo));
+  let c := sin6 (Hw.sub (Hw.slice 1 6 (Hw.add x (zext 1 y))) tt);
+  let d := sin6 (Hw.sub (Hw.add y (zext 1 a)) tt);
+  let sum := Hw.add (Hw.add (zext 2 a) (zext 2 b)) (Hw.add (zext 2 c) (zext 2 d));
+  Px.mk (Hw.lit 2 1) (Hw.add (Hw.slice 1 6 sum) (Hw.slice 1 6 t))
+
+def starsRgb {r : HwTy → Type} [Hw r] (x : r D7) (y : r D6) (t : r D9) : Px r :=
+  let far := starLayer 64 x y (Hw.slice 1 8 t) 5;
+  let mid := starLayer 64 x y (Hw.slice 0 8 t) 42;
+  let near := starLayer 64 x y (Hw.cat (Hw.slice 0 7 t) lo) 23;
+  -- a colour per star: from its column on the screen and its row
+  let hue := Hw.add (Hw.slice 1 6 x) y;
+  Px.mux near (Px.mk (Hw.lit 2 3) hue)
+    (Px.mux mid (Px.mk (Hw.lit 2 1) hue) (Px.mux far (Px.mk (Hw.lit 2 2) hue) (Px.mk (Hw.lit 2 0) hue)))
+
+def scrollerRgb {r : HwTy → Type} [Hw r] (x : r D7) (y : r D6) (t : r D9) (stars : Px r) : Px r :=
+  Px.mux (scroller 64 x y t)
+    (Px.mk (Hw.lit 2 1) (Hw.add (Hw.slice 1 6 x) (Hw.slice 0 6 t)))
+    stars
+
+def xorRgb {r : HwTy → Type} [Hw r] (x : r D7) (y : r D6) (t : r D9) : Px r :=
+  let ph := Hw.slice 1 6 t;
+  let ox := sin6 ph;
+  let oy := sin6 (Hw.add ph (Hw.lit 6 16));
+  let u := Hw.add x (Hw.cat (Hw.lit 1 0) (Hw.cat ox (Hw.slice 2 1 t)));
+  let v := Hw.add (zext 1 y) (Hw.cat (Hw.lit 2 0) oy);
+  let w := Hw.xor u v;
+  Px.mk (Hw.mux (Hw.slice 5 1 w) (Hw.lit 2 1) (Hw.lit 2 2)) (Hw.add (Hw.slice 0 6 w) (Hw.slice 2 6 t))
+
+def effectRgb {r : HwTy → Type} [Hw r] (e : r D2) (x : r D7) (y : r D6) (t : r D9) (stars : Px r) : Px r :=
+  Px.mux (Hw.slice 1 1 e)
+    (Px.mux (Hw.slice 0 1 e) (xorRgb x y t) (scrollerRgb x y t stars))
+    (Px.mux (Hw.slice 0 1 e) stars (plasmaRgb x y t))
+
+-- effect `e` at time `lt`, the one before it to the right of the wipe (x ≥ 2 · lt, so
+-- the wipe is over at lt = 48: 24 frames, half a second)
+def rgbPixel {r : HwTy → Type} [Hw r] (e : r D2) (x : r D7) (y : r D6) (lt : r D9) : r (HwTy.bits 16) :=
+  let stars := starsRgb x y lt;
+  let wiping := band (eqLit (Hw.slice 6 3 lt) 0) (bnot (Hw.ult x (Hw.cat (Hw.slice 0 6 lt) lo)));
+  palette (Px.mux wiping (effectRgb (dec e) x y lt stars) (effectRgb e x y lt stars))

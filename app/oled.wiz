@@ -1,4 +1,4 @@
-import Icestick.OledSim
+import Icestick.OledRgbSim
 import Sys
 -- The flow driver of the OLED demo: `oled COMMAND`. Like `icestick` (app/icestick.wiz),
 -- whose steps it repeats, for the designs of `Icestick.OledSim` (`oled`, `oled64`,
@@ -13,6 +13,7 @@ import Sys
 --   postsim [NAME…] replay the traces on the synthesised netlists
 --   all [NAME…]    gen, sim, bit, postsim
 --   flash NAME     write build/NAME.bin to the board (iceprog)
+--   quick [NAME…] only the Verilog and the pin constraints (no simulation), for `bit`
 --   look ROWS T…   the effects at frame counter values T, without the circuit (quick)
 
 def say (s : String) : EIO Unit := EIO.lift (IO.println s)
@@ -151,9 +152,23 @@ def pickGo (names : List String) : List Design → List Design
   | .cons d ds => match Hdl.member d.name names with
     | .true => .cons d (pickGo names ds)
     | .false => pickGo names ds
+def allDesigns : List Design := List.append Oled.designs OledRgb.designs
 def pick (names : List String) : List Design := match names with
-  | .nil => Oled.designs
-  | .cons _ _ => pickGo names Oled.designs
+  | .nil => allDesigns
+  | .cons _ _ => pickGo names allDesigns
+
+def pinsOf (name : String) : List Pin := match OledRgb.isRgb name with
+  | .true => OledRgb.pins
+  | .false => Oled.pins
+
+-- `quick NAME…`: the Verilog and the pin constraints only, no simulation
+def quickDesign (d : Design) : EIO Unit := do
+  let net := Design.netlist d;
+  check (d.name <+> ": every port has its pin, every pin its port") (match Pcf.check net (pinsOf d.name) with
+    | .nil => .true
+    | _ => .false);
+  FS.writeFile (build (d.name <+> ".pcf")) (Pcf.emit net Oled.clk (pinsOf d.name));
+  FS.writeFile (build (d.name <+> ".v")) (Verilog.emit net)
 
 def gen (names : List String) : EIO Unit := do
   ensureDir "build";
@@ -238,9 +253,10 @@ def run : List String → EIO Unit
       | .true, _, _ => EIO.bind (gen rest) (fun u => EIO.bind (EIO.forEach simDesign (pick rest))
           (fun u => EIO.bind (EIO.forEach bitDesign (pick rest)) (fun u => postsim rest)))
       | _, .true, .cons name _ => tool "iceprog" (.cons (build (name <+> ".bin")) .nil)
-      | _, _, _ => match String.eq cmd "look" with
-        | .true => look rest
-        | .false => EIO.fail usage)
+      | _, _, _ => match String.eq cmd "look", String.eq cmd "quick" with
+        | .true, _ => look rest
+        | _, .true => EIO.bind (ensureDir "build") (fun u => EIO.forEach quickDesign (pick rest))
+        | _, _ => EIO.fail usage)
   | .nil => EIO.fail usage
 
 def main : IO Unit := EIO.toIO (EIO.bind (EIO.lift IO.args) run)
