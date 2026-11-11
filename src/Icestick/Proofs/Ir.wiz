@@ -44,7 +44,7 @@ def Nec.segLen (k b : Nat) : Nat := match Nat.beq k 0, Nat.beq k 1, Nat.beq k 67
     | .true => 1 + 2 * b
     | .false => 1
 
-def IrP.len (k b : Nat) : Nat := BitVec.toNat (@necLen HwTy.El _ (BitVec.ofNat 7 k) (BitVec.ofNat 1 b))
+def IrP.len (k b : Nat) : Nat := BitVec.toNat (@necLen HwTy.El _ (BitVec.ofNat 7 k) (BitVec.ofNat 1 b) (BitVec.ofNat 1 0))
 def IrP.lenOk (k : Nat) : Bool := Bool.and (Nat.beq (IrP.len k 0) (Nec.segLen k 0)) (Nat.beq (IrP.len k 1) (Nec.segLen k 1))
 def IrP.lens : allBelow 68 IrP.lenOk = .true := refl Bool.true
 

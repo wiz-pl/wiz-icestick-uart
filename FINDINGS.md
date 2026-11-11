@@ -292,12 +292,20 @@ Wanted: a `Package.command`/rule target (inputs, outputs, command line), and
   million cycles of the blaster, or one frame of the encoder at the board's timing (1.1
   million cycles), do not fit, so those checks live in `icestick gen` and the test uses
   the faster timing. A per-test limit (`-- test: run 600`) would do.
+* **B5 (bug, performance). A step function over a bundle with many fields compiles
+  very slowly.** With 19 fields in `Blaster` (five of them nested bundles), `#ir
+  blasterStep` took more than 5 minutes and grail's `ir` job for the driver more than 30
+  (it hit grail's job limit); `#ir Blaster.pack` alone took 25 s. Grouping the same
+  registers into three sub-bundles (`Ed`, `Pt`, `Fr`: 8 fields at the top) brought
+  them to 21 s and 6 s, and the driver to minutes. Splitting the step into smaller
+  functions (`keyStep`, `parseLine`, `prnStep`) alone did not help. A synthetic repro
+  is in /workspace/wiz-notes/perf-repros/struct19.wiz (18 s, against 7 s for
+  struct19-grouped.wiz).
 * **P6 (papercut). `IrCfg.board.unit` does not parse as "field `unit` of the constant
   `IrCfg.board`"** ("no field 'board' in a value of type Type"); `IrCfg.unit IrCfg.board`
   works, and so does `cfg.unit` on a variable.
-* **P7 (papercut). Compiling the driver takes about twelve minutes** once
-  `Icestick.Board` imports the IR scenarios (grail's cache makes the second build
-  instant). The checks of the library itself take seconds.
+* **P7 (papercut). Compiling the driver took about twelve minutes** with the IR
+  scenarios, before B5 was worked around (grail's cache makes the second build instant).
 
 ## Papercuts
 

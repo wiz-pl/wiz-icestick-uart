@@ -85,9 +85,11 @@ def IrScn.cr (s : String) : List Nat := List.append (Txt.codes s) (.cons 13 .nil
 -- backspace is answered with three bytes)
 def IrScn.boardLines : List (List Nat) :=
   .cons (IrScn.cr "help") (.cons (IrScn.cr "xyz") (.cons (List.append (Txt.codes "listex") (.cons 8 (.cons 0 (IrScn.cr "n")))) .nil))
+-- (`power` with `hold 1`: one repeat code, 192 units more; the host waits longer)
 def IrScn.fastLines : List (List Nat) :=
-  .cons (IrScn.cr "on") (.cons (IrScn.cr "power") (.cons (IrScn.cr "off") (.cons (IrScn.cr "raw 04FB 08")
-  (.cons (IrScn.cr "raw 20 df") (.cons (IrScn.cr "raw 0g 08") (.cons (IrScn.cr "listen") .nil))))))
+  .cons (IrScn.cr "on") (.cons (IrScn.cr "hold 1") (.cons (List.append (IrScn.cr "power") (.cons 0 (.cons 0 .nil)))
+  (.cons (IrScn.cr "hold 0") (.cons (IrScn.cr "off") (.cons (IrScn.cr "raw 04FB 08")
+  (.cons (IrScn.cr "raw 20 df") (.cons (IrScn.cr "raw 0g 08") (.cons (IrScn.cr "listen") .nil))))))))
 
 -- each line, then a pause of `gap` cycles
 def IrScn.typed : List Nat → List Ev → List Ev
@@ -127,10 +129,12 @@ def Spec.echo : List Nat → List Nat
 def Spec.crlf (rest : List Nat) : List Nat := .cons 13 (.cons 10 rest)
 def Spec.prompt : List Nat := Txt.codes "ir> "
 def Spec.say (s : String) : List Nat := Spec.crlf (List.append (Txt.codes s) (Spec.crlf Spec.prompt))
-def Spec.banner : List Nat := Spec.say "Wiz IR blaster. help"
-def Spec.sent (w : Nat) : List Nat :=
-  Spec.crlf (List.append (Txt.codes "sent ") (Spec.frame w (List.append (Txt.codes ", echo ok") (Spec.crlf Spec.prompt))))
-def Spec.listening : List Nat := Spec.crlf (List.append (Txt.codes "listening, key stops") (Spec.crlf .nil))
+def Spec.banner : List Nat := Spec.say "IR blaster. help"
+def Spec.sent (w n : Nat) : List Nat :=
+  Spec.crlf (List.append (Txt.codes "sent ") (Spec.frame w (.cons 32 (.cons 43 (.cons (48 + n)
+    (List.append (Txt.codes ", echo ok") (Spec.crlf Spec.prompt)))))))
+def Spec.hold (n : Nat) : List Nat := Spec.crlf (List.append (Txt.codes "hold ") (.cons (48 + n) (Spec.crlf Spec.prompt)))
+def Spec.listening : List Nat := Spec.crlf (List.append (Txt.codes "listening") (Spec.crlf .nil))
 def Spec.rx (w : Nat) : List Nat := List.append (Txt.codes "rx ") (Spec.frame w (Spec.crlf .nil))
 def Spec.rxRepeat : List Nat := List.append (Txt.codes "rx repeat") (Spec.crlf .nil)
 
@@ -139,8 +143,8 @@ def Spec.lines : List (List Nat) → List (List Nat) → List Nat
   | .cons l ls, .cons a as => List.append (Spec.echo l) (List.append a (Spec.lines ls as))
   | _, _ => .nil
 
-def Spec.help : List Nat := Spec.say "on off power raw AA[AA] CC listen"
-def Spec.unknown : List Nat := Spec.say "what? (help)"
+def Spec.help : List Nat := Spec.say "on off power raw listen hold N"
+def Spec.unknown : List Nat := Spec.say "? (help)"
 def Spec.stop : List Nat := Spec.crlf Spec.prompt
 
 def IrScn.boardExpect : List Nat := List.append Spec.banner
@@ -151,9 +155,9 @@ def IrScn.fastWords : List Nat :=
   (.cons (Nec.wordX 4 251 8) (.cons (Nec.word 32 223) .nil))))
 def IrScn.fastExpect : List Nat := List.append Spec.banner
   (List.append (Spec.lines IrScn.fastLines
-    (.cons (Spec.sent (Nec.word Lg.addr Lg.on)) (.cons (Spec.sent (Nec.word Lg.addr Lg.power))
-    (.cons (Spec.sent (Nec.word Lg.addr Lg.off)) (.cons (Spec.sent (Nec.wordX 4 251 8))
-    (.cons (Spec.sent (Nec.word 32 223)) (.cons Spec.unknown (.cons Spec.listening .nil))))))))
+    (.cons (Spec.sent (Nec.word Lg.addr Lg.on) 0) (.cons (Spec.hold 1) (.cons (Spec.sent (Nec.word Lg.addr Lg.power) 1)
+    (.cons (Spec.hold 0) (.cons (Spec.sent (Nec.word Lg.addr Lg.off) 0) (.cons (Spec.sent (Nec.wordX 4 251 8) 0)
+    (.cons (Spec.sent (Nec.word 32 223) 0) (.cons Spec.unknown (.cons Spec.listening .nil))))))))))
     (List.append (Spec.rx (Nec.word Lg.addr Lg.power)) (List.append Spec.rxRepeat Spec.stop)))
 
 -- by design name: the input leaves of every cycle, the bit period of the serial port

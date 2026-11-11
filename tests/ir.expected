@@ -21,3 +21,12 @@ encoder, unit 270 cycles, carrier 3/16, frame 482C6A95:
     482C6A95 (whole units: yes)
   as specified, to the cycle: yes
   decoded from the echo: yes
+encoder, frame 20DF10EF and 4 repeat codes: busy 960 units + 0
+  on the TXD pin:
+    20DF10EF (whole units: yes)
+    repeat code (whole units: yes)
+    repeat code (whole units: yes)
+    repeat code (whole units: yes)
+    repeat code (whole units: yes)
+  as specified, 192 units apart: yes
+  decoded from the echo: yes

@@ -52,7 +52,7 @@ transmitter, receiver, input synchroniser). Every register is named after its fi
 | `hello` | sends `Hello from Wiz!\r\n`, waits 0.35 s, again | 105 | 140 MHz |
 | `echo` | sends back every byte it receives | 79 | 216 MHz |
 | `proto` | a CRC service: see below | 125 | 191 MHz |
-| `ir` | the IR blaster: see below (`src/Icestick/Blaster.wiz`) | 1202 | 44 MHz |
+| `ir` | the IR blaster: see below (`src/Icestick/Blaster.wiz`) | 1222 | 41 MHz |
 
 The clock is 12 MHz, so timing is not a concern.
 
@@ -74,11 +74,11 @@ sends NEC frames, the protocol of LG televisions:
 
 ```
 ir> on
-sent 04 FB C4 3B (20DF23DC), echo ok
+sent 04 FB C4 3B (20DF23DC) +0, echo ok
 ir> power
-sent 04 FB 08 F7 (20DF10EF), echo ok
+sent 04 FB 08 F7 (20DF10EF) +4, echo ok
 ir> listen
-listening, key stops
+listening
 rx 04 FB 08 F7 (20DF10EF)
 rx repeat
 ```
@@ -87,10 +87,11 @@ rx repeat
 |---|---|
 | `on` | LG POWER ON: NEC address 0x04, command 0xC4 (discrete: switches on, never off) |
 | `off` | LG POWER OFF: command 0xC5 (discrete) |
-| `power` | LG POWER: command 0x08 (toggles; what the power key of an LG remote sends) |
+| `power` | LG POWER: command 0x08 (toggles; what the power key of an LG remote sends), followed by 4 repeat codes |
 | `raw AA CC` | NEC address `AA`, command `CC` (hexadecimal) |
 | `raw AAAA CC` | extended NEC: the two address bytes in the order sent, no complement |
 | `listen` | print every frame the receiver decodes, until a key is pressed |
+| `hold N` | from now on, follow every frame with N repeat codes (0 … 9); with 0, `power` still sends 4 |
 | `help` or `?` | the list |
 
 To try it: `.grail/bin/icestick flash ir`, then `screen /dev/ttyUSB1 115200` (leave with
@@ -99,7 +100,8 @@ or `power` and Enter. `.grail/bin/icestick irtest /dev/ttyUSB1` sends `on` and `
 and checks both answers.
 
 An answer gives the four bytes in the order sent (address, its complement, command,
-its complement) and the 32 bits with the first bit sent on top, which is how LIRC,
+its complement), the 32 bits with the first bit sent on top, and the number of repeat
+codes after the frame (`+4`), which is how LIRC,
 IRremote and most web pages write NEC codes (`0x20DF10EF` for LG's power key).
 `echo ok` means the decoder saw that very frame come back: the TFDU4101 echoes what it
 transmits on its RXD pin, so this shows that the frame left the FPGA as a frame and
@@ -126,7 +128,11 @@ a duty cycle of 19 %, not the third that remotes often use, because the TFDU4101
 absolute maximum ratings allow its pulsed LED current (about 300 mA, set inside the
 part) only below 20 % duty (and pulses below 90 µs; its own protection turns the LED off
 after 50 µs to 300 µs of TXD high). A unit is 6750 cycles exactly. A frame (LG: 121
-units, 68 ms) is followed by a 40-unit gap; one frame per command, no repeat codes.
+units, 68 ms) is followed by a 40-unit gap, or by repeat codes (16 units on, 4 off, 1 on:
+what a remote sends while a key is held), each starting 192 units (108 ms) after the
+one before. On an LG TV that answered `on` and `off`, a single `power` frame did
+nothing, which is why `power` sends a frame and four repeat codes (0.5 s, a short
+press); `hold N` gives every command N of them.
 
 How well that works is for a TV to say. The LED emits at 870 nm to 910 nm, where TV
 receivers (tuned to 940 nm) are less sensitive, but it is bright (radiant intensity 50

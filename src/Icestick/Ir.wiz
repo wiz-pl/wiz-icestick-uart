@@ -84,7 +84,11 @@ def modStep {r : HwTy → Type} [Hw r] (n : Nat) {ω w : Nat} (c : r (HwTy.bits 
 ------------------------------------------------------------------------------------
 -- The encoder. A frame is 68 segments: 0 the leader mark, 1 the leader space, 2 + 2i
 -- the mark of bit i, 3 + 2i its space, 66 the final mark, 67 a gap of 40 units (22.5 ms,
--- so that frames are at least that far apart). Even segments are marks.
+-- so that frames are at least that far apart). Even segments are marks. Then, if asked
+-- (`reps`, as a remote does while a key is held), repeat codes: 68 a mark of 16, 69 a
+-- space of 4, 70 a mark of 1, 71 a gap of 171; the gap after the frame is then 71
+-- units, so that a standard frame (121 units) and each repeat code start 192 units
+-- (108 ms) after the one before.
 --
 -- State: the segment, the units left in it, the cycle in the unit, the cycle in the
 -- carrier period, busy, and the TXD pin (a register of its own). `start` is taken when
@@ -94,23 +98,28 @@ def modStep {r : HwTy → Type} [Hw r] (n : Nat) {ω w : Nat} (c : r (HwTy.bits 
 
 structure NecTx (r : HwTy → Type) where
   seg : r B7
-  left : r B6
+  left : r B8
+  reps : r B4
   ucnt : r B13
   car : r B9w
   busy : r Bit
   out : r Bit
   deriving Bundle
 
-def NecTx.init : NecTx HwTy.El := NecTx.mk (BitVec.ofNat 7 0) (BitVec.ofNat 6 0) (BitVec.ofNat 13 0)
+def NecTx.init : NecTx HwTy.El := NecTx.mk (BitVec.ofNat 7 0) (BitVec.ofNat 8 0) (BitVec.ofNat 4 0) (BitVec.ofNat 13 0)
   (BitVec.ofNat 9 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
 
 def Nec.gapUnits : Nat := 40
+def Nec.gapRepUnits : Nat := 71
 
--- the length of segment `k` in units, `b` the bit it belongs to (for a bit's space)
-def necLen {r : HwTy → Type} [Hw r] (k : r B7) (b : r Bit) : r B6 :=
+-- the length of segment `k` in units, `b` the bit it belongs to (for a bit's space),
+-- `rp` whether repeat codes follow the frame
+def necLen {r : HwTy → Type} [Hw r] (k : r B7) (b rp : r Bit) : r B8 :=
   let odd := Hw.slice 0 1 k;
-  Hw.mux (eqLit k 0) (Hw.lit 6 16) (Hw.mux (eqLit k 1) (Hw.lit 6 8) (Hw.mux (eqLit k 67) (Hw.lit 6 Nec.gapUnits)
-    (Hw.mux (band odd b) (Hw.lit 6 3) (Hw.lit 6 1))))
+  Hw.mux (eqLit k 0) (Hw.lit 8 16) (Hw.mux (eqLit k 1) (Hw.lit 8 8)
+    (Hw.mux (eqLit k 67) (Hw.mux rp (Hw.lit 8 Nec.gapRepUnits) (Hw.lit 8 Nec.gapUnits))
+    (Hw.mux (eqLit k 68) (Hw.lit 8 16) (Hw.mux (eqLit k 69) (Hw.lit 8 4) (Hw.mux (eqLit k 71) (Hw.lit 8 171)
+    (Hw.mux (band odd b) (Hw.lit 8 3) (Hw.lit 8 1)))))))
 
 def shr32 {r : HwTy → Type} [Hw r] (x : r B32) (b : r Bit) : r B32 := Hw.cat b (Hw.slice 1 31 x)
 
@@ -119,28 +128,35 @@ def bitAt {r : HwTy → Type} [Hw r] (w : r B32) (i : r B6) : Nat → r Bit
   | .zero => Hw.slice 0 1 w
   | .succ k => Hw.mux (eqLit i (Nat.succ k)) (Hw.slice (Nat.succ k) 1 w) (bitAt w i k)
 
-def necTxStep {r : HwTy → Type} [Hw r] (cfg : IrCfg) (s : NecTx r) (start : r Bit) (w : r B32) : r NecTx.code :=
+def necTxStep {r : HwTy → Type} [Hw r] (cfg : IrCfg) (s : NecTx r) (start : r Bit) (w : r B32) (reps : r B4) : r NecTx.code :=
   let go := band start (bnot s.busy);
   let u := modStep cfg.unit s.ucnt;
   let unitEnd := band s.busy (Hw.snd u);
   let segEnd := band unitEnd (eqLit s.left 1);
-  let next := inc s.seg;
+  let more := bnot (eqLit s.reps 0);
+  -- after the frame's gap or a repeat code's: another repeat code, or the end
+  let endFrame := eqLit s.seg 67;
+  let endRep := eqLit s.seg 71;
+  let finish := band segEnd (bor (band endFrame (bnot more)) (band endRep (eqLit s.reps 1)));
+  let next := Hw.mux endRep (Hw.lit 7 68) (inc s.seg);
   -- entering segment 3 + 2i, the space of bit i: i is seg / 2 - 1
   let bit := bitAt w (dec (Hw.slice 1 6 s.seg)) 31;
   let c := modStep cfg.carP s.car;
   let mark := band s.busy (bnot (Hw.slice 0 1 s.seg));
   NecTx.pack (NecTx.mk
     (Hw.mux go (Hw.lit 7 0) (Hw.mux segEnd next s.seg))
-    (Hw.mux go (Hw.lit 6 16) (Hw.mux segEnd (necLen next bit) (Hw.mux unitEnd (dec s.left) s.left)))
+    (Hw.mux go (Hw.lit 8 16) (Hw.mux segEnd (necLen next bit more) (Hw.mux unitEnd (dec s.left) s.left)))
+    (Hw.mux go reps (Hw.mux (band segEnd endRep) (dec s.reps) s.reps))
     (Hw.mux (bor go (bnot s.busy)) (Hw.lit 13 0) (Hw.fst u))
     (Hw.mux (bor go segEnd) (Hw.lit 9 0) (Hw.fst c))
-    (Hw.mux go hi (Hw.mux (band segEnd (eqLit s.seg 67)) lo s.busy))
+    (Hw.mux go hi (Hw.mux finish lo s.busy))
     (band mark (Hw.ult s.car (Hw.lit 9 cfg.carOn))))
 
--- the encoder alone: input (start, word: held), output the TXD pin
+-- the encoder alone: input (start, word: held, repeat codes), output the TXD pin
 structure NecSend (r : HwTy → Type) where
   start : r Bit
   word : r B32
+  reps : r B4
   deriving Bundle
 structure IrLine (r : HwTy → Type) where
   ir_tx : r Bit
@@ -149,7 +165,7 @@ structure IrLine (r : HwTy → Type) where
 
 def necTxC (cfg : IrCfg) : Circuit NecSend.code IrLine.code :=
   Circuit.bundled NecTx.bundle NecSend.bundle IrLine.bundle NecTx.init
-    (fun s x => Hw.pair (necTxStep cfg s x.start x.word) (IrLine.pack (IrLine.mk s.out s.busy)))
+    (fun s x => Hw.pair (necTxStep cfg s x.start x.word x.reps) (IrLine.pack (IrLine.mk s.out s.busy)))
 
 ------------------------------------------------------------------------------------
 -- The decoder. The TFDU4101's RXD goes low for about 2 µs at each rising edge of the
