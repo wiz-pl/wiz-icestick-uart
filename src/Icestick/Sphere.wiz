@@ -1,0 +1,211 @@
+import Icestick.DemoRgb
+-- `sphere`: a ray-traced ball on the PmodOLEDrgb (same controller, driver and pins as
+-- `oledrgb`). A ball of radius 20 orbits left and right and bounces over a checkered floor
+-- that runs towards the viewer, with its shadow on the floor and Lambert shading with a
+-- highlight, under a dusk sky.
+--
+-- The rays are parallel (an orthographic camera looking along z). For the pixel at
+-- (x, y), with (dx, dy) its offset from the ball's centre, the ray hits the ball iff
+-- r² = dx² + dy² ≤ R², and the surface it meets is h = √(R² − r²) in front of the centre;
+-- the normal is (dx, dy, −h)/R. A small serial tracer computes this while the pixel
+-- before it is being sent (32 cycles a pixel, two bytes of 16): five cycles of
+-- shift-and-add squaring (dx², dy², and the shadow's dy′² at the same time), one cycle
+-- for R² − r², five cycles of a bit-by-bit square root (one result bit a cycle, from
+-- the top: try h + 2^b, keep it if its square still fits; with h², h·2^(b+1) and 4^b
+-- kept in registers, a step is two additions and a comparison, no multiplier). Twelve
+-- cycles; the pixel's colour is then a sum and a clamp:
+--
+--   light = 2h − dx − dy + 14     (the light comes from the upper left, in front)
+--
+-- The shadow is the same disc test on the floor, squashed four times vertically.
+
+def D11w : HwTy := HwTy.bits 11
+
+def Sph.r2 : Nat := 400     -- R = 20
+def Sph.floor : Nat := 40   -- the first row of the floor
+def Sph.shadowY : Nat := 54
+
+-- the squarers: three multipliers that shift a bit out of the multiplier and the
+-- multiplicand up each cycle
+structure TrMul (r : HwTy → Type) where
+  mx : r D5
+  my : r D5
+  mz : r D5
+  sx : r D10
+  sy : r D10
+  sz : r D10
+  deriving Bundle
+
+-- r² (then R² − r²), the shadow's r², the cycle counter (0: idle, 12: done)
+structure TrAcc (r : HwTy → Type) where
+  acc : r D11w
+  acc2 : r D11w
+  cnt : r D4
+  deriving Bundle
+
+-- the square root: h², h · 2^(b+1) (h at the end), 4^b
+structure TrRoot (r : HwTy → Type) where
+  h2 : r D11w
+  dd : r D11w
+  ee : r D9
+  deriving Bundle
+
+-- misses (the ball, the shadow), and the offsets (two's complement, 6 bits) for shading
+structure TrPix (r : HwTy → Type) where
+  far : r Bit
+  farS : r Bit
+  dx : r D6
+  dy : r D6
+  deriving Bundle
+
+structure Tracer (r : HwTy → Type) where
+  mul : TrMul r
+  ac : TrAcc r
+  rt : TrRoot r
+  px : TrPix r
+  deriving Bundle
+
+def Tracer.init : Tracer HwTy.El :=
+  Tracer.mk
+    (TrMul.mk (BitVec.ofNat 5 0) (BitVec.ofNat 5 0) (BitVec.ofNat 5 0) (BitVec.ofNat 10 0) (BitVec.ofNat 10 0) (BitVec.ofNat 10 0))
+    (TrAcc.mk (BitVec.ofNat 11 0) (BitVec.ofNat 11 0) (BitVec.ofNat 4 0))
+    (TrRoot.mk (BitVec.ofNat 11 0) (BitVec.ofNat 11 0) (BitVec.ofNat 9 0))
+    (TrPix.mk (BitVec.ofNat 1 1) (BitVec.ofNat 1 1) (BitVec.ofNat 6 0) (BitVec.ofNat 6 0))
+
+-- |a| of an 8-bit two's complement number, and whether it is above 31
+def abs8 {r : HwTy → Type} [Hw r] (a : r D8) : r D8 :=
+  Hw.mux (Hw.slice 7 1 a) (Hw.sub (Hw.lit 8 0) a) a
+def big8 {r : HwTy → Type} [Hw r] (m : r D8) : r Bit := bnot (eqLit (Hw.slice 5 3 m) 0)
+
+def pick10 {r : HwTy → Type} [Hw r] (b : r Bit) (v : r D10) : r D11w :=
+  Hw.mux b (zext 1 v) (Hw.lit 11 0)
+
+-- the ball's centre and the shadow's, at time t
+structure Scene (r : HwTy → Type) where
+  cx : r D7
+  cy : r D6
+
+def Scene.at {r : HwTy → Type} [Hw r] (t : r D9) : Scene r :=
+  let p := Hw.slice 2 6 t;
+  let bounce := Hw.sub (sin6 (Hw.cat (Hw.slice 0 5 p) lo)) (Hw.lit 5 16);
+  let up := Hw.mux (Hw.slice 4 1 bounce) (Hw.sub (Hw.lit 5 0) bounce) bounce;
+  Scene.mk (Hw.add (Hw.lit 7 32) (zext 2 (sin6 p))) (Hw.sub (Hw.lit 6 26) (zext 1 up))
+
+-- one cycle; `start` with the target pixel (tx, ty) begins a new pixel
+def traceStep {r : HwTy → Type} [Hw r] (s : Tracer r) (start : r Bit) (tx : r D7) (ty : r D6) (sc : Scene r) : r Tracer.code :=
+  let dx := Hw.sub (zext 1 tx) (zext 1 sc.cx);
+  let dy := Hw.sub (zext 2 ty) (zext 2 sc.cy);
+  let dz := Hw.sub (zext 2 ty) (Hw.lit 8 Sph.shadowY);
+  let ax := abs8 dx;
+  let ay := abs8 dy;
+  let az := abs8 dz;
+  let m := s.mul;
+  let a := s.ac;
+  let q := s.rt;
+  let squaring := band (bnot (eqLit a.cnt 0)) (Hw.ult a.cnt (Hw.lit 4 6));
+  let six := eqLit a.cnt 6;
+  let rooting := band (bnot (Hw.ult a.cnt (Hw.lit 4 7))) (Hw.ult a.cnt (Hw.lit 4 12));
+  let xs := pick10 (Hw.slice 0 1 m.mx) m.sx;
+  let trial := Hw.add q.h2 (Hw.add q.dd (zext 2 q.ee));
+  let fits := bnot (Hw.ult a.acc trial);
+  let over := Hw.ult (Hw.lit 11 Sph.r2) a.acc;
+  let over2 := Hw.ult (Hw.lit 11 Sph.r2) a.acc2;
+  let shl := fun (v : r D10) => Hw.cat (Hw.slice 0 9 v) lo;
+  let shr := fun (v : r D5) => Hw.cat lo (Hw.slice 1 4 v);
+  Tracer.pack (Tracer.mk
+    (TrMul.mk
+      (Hw.mux start (Hw.slice 0 5 ax) (Hw.mux squaring (shr m.mx) m.mx))
+      (Hw.mux start (Hw.slice 0 5 ay) (Hw.mux squaring (shr m.my) m.my))
+      (Hw.mux start (Hw.cat (Hw.slice 0 3 az) (Hw.lit 2 0)) (Hw.mux squaring (shr m.mz) m.mz))
+      (Hw.mux start (zext 5 (Hw.slice 0 5 ax)) (Hw.mux squaring (shl m.sx) m.sx))
+      (Hw.mux start (zext 5 (Hw.slice 0 5 ay)) (Hw.mux squaring (shl m.sy) m.sy))
+      (Hw.mux start (zext 5 (Hw.cat (Hw.slice 0 3 az) (Hw.lit 2 0))) (Hw.mux squaring (shl m.sz) m.sz)))
+    (TrAcc.mk
+      (Hw.mux start (Hw.lit 11 0) (Hw.mux squaring (Hw.add a.acc (Hw.add xs (pick10 (Hw.slice 0 1 m.my) m.sy)))
+        (Hw.mux six (Hw.sub (Hw.lit 11 Sph.r2) a.acc) a.acc)))
+      (Hw.mux start (Hw.lit 11 0) (Hw.mux squaring (Hw.add a.acc2 (Hw.add xs (pick10 (Hw.slice 0 1 m.mz) m.sz))) a.acc2))
+      (Hw.mux start (Hw.lit 4 1) (Hw.mux (bor squaring (bor six rooting)) (inc a.cnt) a.cnt)))
+    (TrRoot.mk
+      (Hw.mux six (Hw.lit 11 0) (Hw.mux (band rooting fits) trial q.h2))
+      (Hw.mux six (Hw.lit 11 0) (Hw.mux rooting
+        (Hw.add (Hw.cat lo (Hw.slice 1 10 q.dd)) (Hw.mux fits (zext 2 q.ee) (Hw.lit 11 0))) q.dd))
+      (Hw.mux six (Hw.lit 9 256) (Hw.mux rooting (Hw.cat (Hw.lit 2 0) (Hw.slice 2 7 q.ee)) q.ee)))
+    (TrPix.mk
+      (Hw.mux start (bor (big8 ax) (big8 ay)) (Hw.mux six (bor s.px.far over) s.px.far))
+      (Hw.mux start (bor (big8 ax) (Hw.ult (Hw.lit 8 7) az)) (Hw.mux six (bor s.px.farS over2) s.px.farS))
+      (Hw.mux start (Hw.slice 0 6 dx) s.px.dx)
+      (Hw.mux start (Hw.slice 0 6 dy) s.px.dy)))
+
+-- the floor's depth by row (k = 0 at the horizon): 96 / (k + 3), as 5 bits
+def Sph.depthGo : Nat → Nat → List Nat
+  | .zero, k => .nil
+  | .succ n, k => .cons (Nat.mod (Nat.div 96 (k + 3)) 32) (Sph.depthGo n (k + 1))
+def Sph.depthT : RomT := RomT.build 5 (Sph.depthGo 32 0)
+
+-- the floor (rows from 40: depth bands that run towards the viewer, columns that widen
+-- with the depth, a shift of x − 48 by 3, 2 or 1 places; dark where `shadow`) and the
+-- sky (dark blue at the top to purple at the horizon)
+def backdrop {r : HwTy → Type} [Hw r] (shadow : r Bit) (x : r D7) (y : r D6) (t : r D9) : r (HwTy.bits 16) :=
+  let k := Hw.sub y (Hw.lit 6 Sph.floor);
+  let depth := Rom.at 5 (Hw.slice 0 5 k) Sph.depthT;
+  let zb := Hw.slice 3 1 (Hw.add depth (Hw.slice 0 5 t));
+  let u := Hw.sub (zext 1 x) (Hw.lit 8 48);
+  let us := Hw.mux (Hw.slice 4 1 k) (Hw.slice 4 1 u) (Hw.mux (Hw.slice 3 1 k) (Hw.slice 3 1 u) (Hw.slice 2 1 u));
+  let light := Hw.xor zb us;
+  let fl := Hw.mux light (rgb565 (Hw.lit 5 14) (Hw.lit 6 30) (Hw.lit 5 10)) (rgb565 (Hw.lit 5 4) (Hw.lit 6 10) (Hw.lit 5 6));
+  let floor := Hw.mux shadow (rgb565 (Hw.lit 5 1) (Hw.lit 6 3) (Hw.lit 5 2)) fl;
+  let sky := rgb565 (Hw.slice 1 5 y) (Hw.cat (Hw.lit 2 0) (Hw.slice 2 4 y)) (Hw.add (Hw.lit 5 8) (Hw.cat lo (Hw.slice 2 4 y)));
+  Hw.mux (Hw.ult y (Hw.lit 6 Sph.floor)) sky floor
+
+-- the colour of the pixel at (x, y) from the tracer's result for it
+def sphereColor {r : HwTy → Type} [Hw r] (hit shadow : r Bit) (h : r D5) (dx dy : r D6) (x : r D7) (y : r D6) (t : r D9) : r (HwTy.bits 16) :=
+  -- the ball: 2h + 14 − dx − dy, clamped to 0 … 63, orange; white above 57
+  let sx := fun (v : r D6) => Hw.cat (Hw.slice 5 1 v) (Hw.cat (Hw.slice 5 1 v) v);
+  let v := Hw.sub (Hw.sub (Hw.add (Hw.cat (Hw.lit 2 0) (Hw.cat h lo)) (Hw.lit 8 14)) (sx dx)) (sx dy);
+  let neg := Hw.slice 7 1 v;
+  let lum := Hw.mux neg (Hw.lit 6 0) (Hw.mux (Hw.slice 6 1 v) (Hw.lit 6 63) (Hw.slice 0 6 v));
+  let ball := Hw.mux (Hw.ult (Hw.lit 6 57) lum) (Hw.lit 16 65535)
+    (rgb565 (Hw.slice 1 5 lum) (Hw.cat lo (Hw.slice 1 5 lum)) (Hw.cat (Hw.lit 2 0) (Hw.slice 3 3 lum)));
+  Hw.mux hit ball (backdrop shadow x y t)
+
+------------------------------------------------------------------------------------
+-- The design: the colour controller, the tracer, the LEDs (LED5 on with the display,
+-- LED1 … LED4 a bar that follows the ball's height).
+
+structure SphereDemo (fl : Nat) (r : HwTy → Type) where
+  ctl : RCtl fl r
+  tr : Tracer r
+  deriving Bundle
+
+def SphereDemo.init (c : RgbCfg) : SphereDemo c.frameLog HwTy.El := SphereDemo.mk (RCtl.init c) Tracer.init
+
+def sphereStep {r : HwTy → Type} [Hw r] (c : RgbCfg) (rom : RomT) (s : SphereDemo c.frameLog r) (x : OledPins r)
+    : r (HwTy.prod (SphereDemo.code c.frameLog) RgbBoard.code) :=
+  let cs := s.ctl;
+  let g := cs.gen;
+  let t := Hw.slice 0 9 cs.fr.t;
+  let sc := Scene.at t;
+  -- when the controller loads a byte: a command (the tracer starts on the pixel the
+  -- generator is at, (0, 0) after the frame's window commands) or a pixel's high byte
+  -- (the tracer starts on the next pixel)
+  let op := ROp.of (Rom.at 9 cs.sq.pc rom);
+  let ready := spiReady cs.spi;
+  let loadCmd := band op.cmd ready;
+  let loadHi := band (band (bor op.blank op.pix) ready) (bnot g.half);
+  let lastX := eqLit g.x (Rgb.width - 1);
+  let tx := Hw.mux loadHi (Hw.mux lastX (Hw.lit 7 0) (inc g.x)) g.x;
+  let ty := Hw.mux (band loadHi lastX) (inc g.y) g.y;
+  let tr := s.tr;
+  let color := sphereColor (bnot tr.px.far) (bnot tr.px.farS) (Hw.slice 0 5 tr.rt.dd) tr.px.dx tr.px.dy g.x g.y t;
+  let p := cs.pins;
+  let lv := Hw.slice 3 2 sc.cy;
+  let bar := Hw.cat (eqLit lv 0) (Hw.cat (Hw.ult lv (Hw.lit 2 2)) (Hw.cat (Hw.ult lv (Hw.lit 2 3)) hi));
+  Hw.pair
+    (SphereDemo.pack c.frameLog (SphereDemo.mk (RCtl.unpack c.frameLog (rctlStep c rom cs color))
+      (Tracer.unpack (traceStep tr (bor loadCmd loadHi) tx ty sc))))
+    (RgbBoard.pack (RgbBoard.mk hi (Hw.cat (rctlShowing cs) bar)
+      p.cs cs.spi.mosi cs.spi.sclk p.dc p.res p.vccen p.pmoden))
+
+def sphereDesign (c : RgbCfg) : Circuit OledPins.code RgbBoard.code :=
+  let rom := RProg.tree;
+  Circuit.bundled (SphereDemo.bundle c.frameLog) OledPins.bundle RgbBoard.bundle (SphereDemo.init c) (sphereStep c rom)
