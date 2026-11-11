@@ -53,6 +53,8 @@ transmitter, receiver, input synchroniser). Every register is named after its fi
 | `echo` | sends back every byte it receives | 79 | 216 MHz |
 | `proto` | a CRC service: see below | 125 | 191 MHz |
 | `ir` | the IR blaster: see below (`src/Icestick/Blaster.wiz`) | 1202 | 44 MHz |
+| `oled` | the OLED demo for the PmodOLED (128 × 32): see below (`src/Icestick/Demo.wiz`) | 730 | 53 MHz |
+| `oled64` | the same for a 128 × 64 SSD1306 module | 758 | 49 MHz |
 
 The clock is 12 MHz, so timing is not a concern.
 
@@ -331,6 +333,12 @@ ir> listen              listening, key stops   (no remote at hand: nothing; a ke
 turned it back into the frame sent, so the LED was driven with NEC timing. Whether a TV
 reacts was not observed (no TV in reach of the board), nor whether the IrDA receiver
 sees a 940 nm remote (`listen` with an LG remote a few centimetres away will tell).
+
+### The OLED demo on the board (2026-11-11)
+
+Flashed `oled` (commit 3d1fbbe; 730 of 1280 logic cells, no block RAM, 53 MHz by
+nextpnr, 52 MHz by icetime) at 21:15 (+02:00): iceprog wrote and verified it. What the
+display shows was not seen from here (no camera).
 
 ### Without a board
 

@@ -1,0 +1,7 @@
+spi, bytes wrong from low idle: 0, from high idle: 0
+sine, phases wrong: 0
+init 128x32 as wanted: yes
+init 128x64 as wanted: yes
+init 128x32 bytes: 174 213 128 168 31 211 0 64 141 20 32 0 161 200 218 2 129 207 217 241 219 64 164 166 33 0 127 34 0 3 175 
+oled_fast, 12000 cycles: VDD on at 1, RES low 60 … 103
+  command bytes: 174 213 128 168 31 211 0 64 141 20 32 0 161 200 218 2 129 207 217 241 219 64 164 166 33 0 127 34 0 3 175 
