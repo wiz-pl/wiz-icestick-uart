@@ -355,6 +355,20 @@ A demo for an SSD1306 OLED (Digilent PmodOLED, 128 × 32) on the Pmod connector:
   again on the netlist; so `look rgb` (the effects evaluated directly) was what was used
   to judge the colours.
 
+* **Ray tracing (`sphere`, `blobs`).** Both were written, fitted and flashed without a
+  circuit simulation; `oled look sphere|blobs` (the step functions evaluated pixel by
+  pixel at `HwTy.El`, a frame in seconds) was the check before each flash, and it
+  caught real problems: the first `blobs` used an octagonal 3-D length estimate and
+  drew octagons, and shaded from the march's depth, which that estimate gets wrong, so
+  the highlights were huge blocks. `blobs` went through six place-and-route rounds
+  (1717 → 1538 → 1372 → 1230 → 1269 → 1282 of 1280 cells) to fit: G16 again, with no
+  estimate before nextpnr. What fitted: one distance unit shared by the two balls (two
+  cycles a step), the per-pixel part of the length computed exactly once per pixel in
+  a separate pipeline stage, tables for the smooth minimum's square and the sphere's
+  front, and no floor. Hw.mul was never used: at these widths it would not fit.
+* **P10 (papercut). `pkill -f PATTERN` from a shell whose command line contains the
+  pattern kills that shell** (AGENTS.md warns about it; it happened once here).
+
 ## Papercuts
 
 * **P1. Error messages are not bounded.** A mismatch that involves an equation between

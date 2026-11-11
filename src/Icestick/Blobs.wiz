@@ -19,11 +19,13 @@ import Icestick.Sphere
 --    so a step never passes through a surface; it is exact where the ray is closest to
 --    the centre, so the outlines are exact circles). The two balls are joined by the
 --    quadratic smooth minimum smin(a, b) = min(a, b) − max(k − |a − b|, 0)² / (4k),
---    k = 8 pixels, the square from a 17-entry table: no multiplier anywhere.
+--    k = 16 pixels, the square from a 17-entry table: no multiplier anywhere.
 --
--- Shading: by the nearer ball's normal (the vector from its centre, unnormalised, both
--- radii equal), light from the upper left in front: brightness 24 + (−nx − ny − 2nz)/4,
--- white from 52; ball 1 orange, ball 2 cyan.
+-- Shading: by the nearer ball's normal, (dx, dy, −√(R² − ρ²)) from its ρ and a 25-entry
+-- table (not from the march's depth, which the length estimate leaves off), light from
+-- the upper left in front: brightness 20 + 3/8 (−nx − ny − 2nz); from brightness 56 the
+-- colour runs to white (a small highlight). Ball 1 orange, ball 2 cyan; in the neck
+-- the nearer ball's normal lies near its rim, so the neck is darker.
 -- Lengths are in quarter pixels, 12-bit two's complement.
 
 def D12 : HwTy := HwTy.bits 12
@@ -32,6 +34,7 @@ def D14 : HwTy := HwTy.bits 14
 
 def Bl.R : Nat := 48        -- the radius, 12 pixels
 def Bl.far : Nat := 640     -- z beyond the scene (160 pixels)
+def Bl.z0 : Nat := 128      -- where the rays start (32 pixels: in front of everything)
 
 -- the balls' centres (units: quarter pixels)
 structure BScene (r : HwTy → Type) where
@@ -75,11 +78,19 @@ def norm2 {r : HwTy → Type} [Hw r] (a c : r D12) : r D12 :=
   let s := Hw.add a c;
   max12 (max12 a c) (Hw.add (shr1 s) (Hw.add (shr3 s) (shr4 s)))
 
--- max(k − |a − b|, 0)² / (4k) with k = 32 units, by g = k − |a − b| halved (0 … 16)
+-- max(k − |a − b|, 0)² / (4k) with k = 64 units (16 pixels), by g = k − |a − b|
+-- quartered (0 … 16): (4i)² / 256
 def Bl.corrGo : Nat → Nat → List Nat
   | .zero, g => .nil
-  | .succ n, g => .cons (Nat.div (4 * g * g) 128) (Bl.corrGo n (g + 1))
+  | .succ n, g => .cons (Nat.div (16 * g * g) 256) (Bl.corrGo n (g + 1))
 def Bl.corrT : RomT := RomT.build 5 (Bl.corrGo 17 0)
+
+-- ⌊√m⌋, by counting (meta level)
+def Bl.isqrt (m : Nat) : Nat → Nat → Nat
+  | h, .zero => h
+  | h, .succ k => match Nat.le ((h + 1) * (h + 1)) m with
+    | .true => Bl.isqrt m (h + 1) k
+    | .false => h
 
 ------------------------------------------------------------------------------------
 -- Stage A: ρ for both balls.
@@ -211,11 +222,11 @@ def StageB.init : StageB HwTy.El :=
 def ballDist {r : HwTy → Type} [Hw r] (rho cz z : r D12) : r D12 :=
   Hw.sub (norm2 rho (abs12 (Hw.sub z cz))) (Hw.lit 12 Bl.R)
 
--- the smooth minimum (k = 32 units), less one unit for the rounding
+-- the smooth minimum (k = 64 units), less one unit for the rounding
 def sminK {r : HwTy → Type} [Hw r] (d1 d2 : r D12) : r D12 :=
   let e := abs12 (Hw.sub d2 d1);
-  let g := Hw.mux (Hw.ult e (Hw.lit 12 32)) (Hw.sub (Hw.lit 12 32) e) (Hw.lit 12 0);
-  Hw.sub (Hw.sub (smin12 d1 d2) (zext 7 (Rom.at 5 (Hw.slice 1 5 g) Bl.corrT))) (Hw.lit 12 1)
+  let g := Hw.mux (Hw.ult e (Hw.lit 12 64)) (Hw.sub (Hw.lit 12 64) e) (Hw.lit 12 0);
+  Hw.sub (Hw.sub (smin12 d1 d2) (zext 7 (Rom.at 5 (Hw.slice 2 5 g) Bl.corrT))) (Hw.lit 12 1)
 
 def x4 {r : HwTy → Type} [Hw r] (v : r D8) : r D12 :=
   Hw.cat (Hw.slice 7 1 v) (Hw.cat (Hw.slice 7 1 v) (Hw.cat v (Hw.lit 2 0)))
@@ -238,7 +249,7 @@ def stageBStep {r : HwTy → Type} [Hw r] (s : StageB r) (shift : r Bit) (a : AO
     (BIn.mk (Hw.mux shift (zext 4 a.rho1) b.rho1) (Hw.mux shift (zext 4 a.rho2) b.rho2)
       (Hw.mux shift (nl a.dx1 a.dy1) b.l1) (Hw.mux shift (nl a.dx2 a.dy2) b.l2))
     (BMarch.mk
-      (Hw.mux shift (Hw.lit 12 0) (Hw.mux (band marching (bnot close)) z2 mr.z))
+      (Hw.mux shift (Hw.lit 12 Bl.z0) (Hw.mux (band marching (bnot close)) z2 mr.z))
       (Hw.mux shift (Hw.lit 5 16) (Hw.mux marching (dec mr.left) mr.left))
       (Hw.mux shift lo (Hw.mux (band marching close) hi mr.hit))
       (Hw.mux shift lo (Hw.mux (band marching (bor close gone)) hi mr.done))
@@ -246,18 +257,34 @@ def stageBStep {r : HwTy → Type} [Hw r] (s : StageB r) (shift : r Bit) (a : AO
     (BHalf.mk (Hw.mux shift lo (bnot ph)) (Hw.mux ph s.hf.d1 dd)))
 
 -- the colour of the pixel from stage B's result for it
+-- the front of a ball at distance ρ from its centre line: √(R² − ρ²), units, by ρ in
+-- half pixels (0 beyond the radius)
+def Bl.frontGo : Nat → Nat → List Nat
+  | .zero, i => .nil
+  | .succ n, i => .cons (Bl.isqrt (Nat.sub 2304 (4 * i * i)) 0 64) (Bl.frontGo n (i + 1))
+def Bl.frontT : RomT := RomT.build 5 (Bl.frontGo 25 0)
+
 def blobColor {r : HwTy → Type} [Hw r] (s : StageB r) (sc : BScene r) (x : r D7) (y : r D6) (t : r D9) : r (HwTy.bits 16) :=
   let b := s.inp;
-  let z := s.mr.z;
   let n1 := s.mr.near1;
-  -- −nx − ny − 2 nz of the nearer ball
-  let l := Hw.sub (Hw.mux n1 b.l1 b.l2) (Hw.cat (Hw.slice 0 11 (Hw.sub z (Hw.mux n1 sc.z1 sc.z2))) lo);
-  let v := Hw.add (Hw.lit 12 24) (Hw.cat (Hw.slice 11 1 l) (Hw.cat (Hw.slice 11 1 l) (Hw.slice 2 10 l)));
+  -- −nx − ny − 2 nz of the nearer ball, nz from its ρ (the sphere's own normal, not
+  -- the march's depth, which the length estimate leaves up to 8 % off)
+  let rho := Hw.mux n1 b.rho1 b.rho2;
+  let idx := Hw.mux (eqLit (Hw.slice 6 6 rho) 0) (Hw.slice 1 5 rho) (Hw.lit 5 31);
+  let front := zext 6 (Rom.at 6 idx Bl.frontT);
+  let l := Hw.add (Hw.mux n1 b.l1 b.l2) (Hw.cat (Hw.slice 0 11 front) lo);
+  -- brightness 20 + 3/8 l (l ≤ 117: up to 63), clamped
+  let sg := Hw.slice 11 1 l;
+  let l4 := Hw.cat sg (Hw.cat sg (Hw.slice 2 10 l));
+  let l8 := Hw.cat sg (Hw.cat sg (Hw.cat sg (Hw.slice 3 9 l)));
+  let v := Hw.add (Hw.lit 12 20) (Hw.add l4 l8);
   let lum := Hw.mux (neg12 v) (Hw.lit 6 0) (Hw.mux (Hw.ult v (Hw.lit 12 64)) (Hw.slice 0 6 v) (Hw.lit 6 63));
-  let white := Hw.ult (Hw.lit 6 51) lum;
+  -- the highlight: from brightness 56 up, the colour runs to white (OR-ed in)
+  let sp := Hw.mux (eqLit (Hw.slice 3 3 lum) 7) (Hw.cat (Hw.slice 0 3 lum) lo) (Hw.lit 4 0);
   let orange := rgb565 (Hw.slice 1 5 lum) (Hw.cat lo (Hw.slice 1 5 lum)) (Hw.cat (Hw.lit 2 0) (Hw.slice 3 3 lum));
   let cyan := rgb565 (Hw.cat (Hw.lit 2 0) (Hw.slice 3 3 lum)) lum (Hw.slice 1 5 lum);
-  let ball := Hw.mux white (Hw.lit 16 65535) (Hw.mux n1 orange cyan);
+  let spec := rgb565 (Hw.cat sp lo) (Hw.cat sp (Hw.lit 2 0)) (Hw.cat sp lo);
+  let ball := Hw.or (Hw.mux n1 orange cyan) spec;
   -- the sky: dark blue at the top to purple at the bottom
   let sky := rgb565 (Hw.slice 1 5 y) (Hw.cat (Hw.lit 2 0) (Hw.slice 2 4 y)) (Hw.add (Hw.lit 5 8) (Hw.cat lo (Hw.slice 2 4 y)));
   Hw.mux s.mr.hit ball sky
@@ -302,8 +329,7 @@ def blobsStep {r : HwTy → Type} [Hw r] (c : RgbCfg) (rom : RomT) (s : BlobsDem
   let ty := Hw.mux (bor fStart fShift) (Hw.lit 6 0) (Hw.snd n2);
   let color := blobColor s.b sc g.x g.y t;
   let p := cs.pins;
-  let lv := Hw.slice 4 2 sc.z1;
-  let bar := Hw.cat (eqLit lv 3) (Hw.cat (bnot (Hw.ult lv (Hw.lit 2 2))) (Hw.cat (bnot (eqLit lv 0)) hi));
+  let bar := Hw.lit 4 1;
   Hw.pair
     (BlobsDemo.pack c.frameLog (BlobsDemo.mk (RCtl.unpack c.frameLog (rctlStep c rom cs color))
       (StageA.unpack (stageAStep s.a (bor fStart shift) tx ty sc))

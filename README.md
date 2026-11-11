@@ -292,7 +292,7 @@ blobs`; `oled look sphere T…` and `oled look blobs T…` render frames without
   of dx and dy, a bit-by-bit square root for the depth of the surface, Lambert shading
   2h − dx − dy. An exact ray–sphere intersection, no multiplier.
 * **`blobs`**: a sphere tracer: two balls (radius 12) joined by a smooth minimum
-  (quadratic, k = 8 pixels), swinging through each other so that they merge and split.
+  (quadratic, k = 16 pixels), swinging through each other so that they merge and split.
   A two-stage pipeline, one pixel per 32 cycles: stage A computes, for the pixel two
   ahead, each ball's ρ = |(dx, dy)| exactly (serial squares and square root, half-pixel
   precision); stage B marches the next pixel's ray, 16 steps, z += d, d from a
