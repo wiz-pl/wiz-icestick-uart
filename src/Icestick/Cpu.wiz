@@ -1,0 +1,350 @@
+import Icestick.Uart
+-- A toy CPU (docs/cpu.md): an 8-bit accumulator machine with fourteen instructions,
+-- eight bytes of data memory, five LEDs and the UART. Three things here:
+--
+-- 1. The architecture, as values: the state (`Core HwTy.El`), the instructions as a
+--    type (`Instr`), what one instruction does (`Spec.exec`) and the machine as a pure
+--    step function on states (`Spec.step : Arch → Arch`).
+-- 2. The hardware: the same state as a bundle of registers, and one combinational
+--    step (`coreStep`: decoder, ALU, next PC, memory, I/O handshake), polymorphic in
+--    the representation as everything here, so that it simulates and synthesises.
+-- 3. The board design `cpu n prog`: the core, the program as a ROM of multiplexers,
+--    the UART receiver (with a one-byte buffer) and transmitter.
+--
+-- `Icestick.Proofs.Cpu` proves that `coreStep` at values is `Spec.exec`, for every
+-- instruction, every state and every I/O condition.
+
+def B3 : HwTy := HwTy.bits 3
+def B12 : HwTy := HwTy.bits 12
+
+------------------------------------------------------------------------------------
+-- The architectural state. The registers of the circuit are exactly these (and the
+-- UART's): PC, the accumulator A, the data memory M[0] … M[7], the LED latch.
+
+structure Mem (r : HwTy → Type) where
+  m0 : r B8
+  m1 : r B8
+  m2 : r B8
+  m3 : r B8
+  m4 : r B8
+  m5 : r B8
+  m6 : r B8
+  m7 : r B8
+  deriving Bundle
+
+structure Core (r : HwTy → Type) where
+  pc : r B8
+  acc : r B8
+  mem : Mem r
+  leds : r B5
+  deriving Bundle
+
+-- An instruction word, as the ROM gives it: the opcode and the operand.
+structure Ins (r : HwTy → Type) where
+  op : r B4
+  arg : r B8
+  deriving Bundle
+
+-- What the core sees of the UART: the transmitter can take a byte; a received byte
+-- is waiting (and which).
+structure Port (r : HwTy → Type) where
+  txReady : r Bit
+  rxFull : r Bit
+  rxByte : r B8
+  deriving Bundle
+
+-- What the core does to it: send `data` (only when `send`), take the waiting byte.
+structure Act (r : HwTy → Type) where
+  send : r Bit
+  data : r B8
+  take : r Bit
+  deriving Bundle
+
+------------------------------------------------------------------------------------
+-- The opcodes (docs/cpu.md has the table)
+
+def Op.halt : Nat := 0
+def Op.ldi : Nat := 1
+def Op.ld : Nat := 2
+def Op.st : Nat := 3
+def Op.addi : Nat := 4
+def Op.add : Nat := 5
+def Op.sub : Nat := 6
+def Op.nand : Nat := 7
+def Op.jmp : Nat := 8
+def Op.jz : Nat := 9
+def Op.jnz : Nat := 10
+def Op.out : Nat := 11
+def Op.inp : Nat := 12
+def Op.led : Nat := 13
+
+------------------------------------------------------------------------------------
+-- 1. The architecture, on values.
+
+-- The instructions. A memory operand is an address (three bits); a jump's is the
+-- target; `ldi` and `addi` take a constant.
+inductive Instr where
+  | halt
+  | ldi (k : BitVec 8)
+  | ld (a : BitVec 3)
+  | st (a : BitVec 3)
+  | addi (k : BitVec 8)
+  | add (a : BitVec 3)
+  | sub (a : BitVec 3)
+  | nand (a : BitVec 3)
+  | jmp (t : BitVec 8)
+  | jz (t : BitVec 8)
+  | jnz (t : BitVec 8)
+  | out
+  | inp
+  | led
+
+-- A conditional on a bit: `x` if `c` is 1. (The same function as the value instance's
+-- multiplexer, so that the two sides of the proofs meet: docs/cpu.md, "the proof".)
+def Spec.pick (c : BitVec 1) (x y : BitVec 8) : BitVec 8 := @HwTy.El.mux B8 c x y
+def Spec.is {ω n : Nat} (a : BitVec n) (k : Nat) : BitVec 1 := Bool.toBits (BitVec.beq a (BitVec.ofNat n k))
+def Spec.one : BitVec 1 := BitVec.ofNat 1 1
+def Spec.zero : BitVec 1 := BitVec.ofNat 1 0
+
+-- the low three bits of an operand: a memory address
+def Spec.addr (k : BitVec 8) : BitVec 3 := HwTy.El.slice 0 3 k
+
+def Spec.decodeN : Nat → BitVec 8 → Instr
+  | .zero, k => .halt
+  | .succ .zero, k => .ldi k
+  | .succ (.succ .zero), k => .ld (Spec.addr k)
+  | .succ (.succ (.succ .zero)), k => .st (Spec.addr k)
+  | .succ (.succ (.succ (.succ .zero))), k => .addi k
+  | .succ (.succ (.succ (.succ (.succ .zero)))), k => .add (Spec.addr k)
+  | .succ (.succ (.succ (.succ (.succ (.succ .zero))))), k => .sub (Spec.addr k)
+  | .succ (.succ (.succ (.succ (.succ (.succ (.succ .zero)))))), k => .nand (Spec.addr k)
+  | .succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ .zero))))))), k => .jmp k
+  | .succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ .zero)))))))), k => .jz k
+  | .succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ .zero))))))))), k => .jnz k
+  | .succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ .zero)))))))))), k => .out
+  | .succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ .zero))))))))))), k => .inp
+  | .succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ .zero)))))))))))), k => .led
+  | _, k => .halt   -- 14 and 15 are spare: they halt
+
+def Spec.decode (i : Ins HwTy.El) : Instr := Spec.decodeN (BitVec.toNat i.op) i.arg
+
+-- the data memory: M[a], and M with M[a] := v
+def Spec.read (m : Mem HwTy.El) (a : BitVec 3) : BitVec 8 :=
+  Spec.pick (Spec.is a 0) m.m0 (Spec.pick (Spec.is a 1) m.m1 (Spec.pick (Spec.is a 2) m.m2
+  (Spec.pick (Spec.is a 3) m.m3 (Spec.pick (Spec.is a 4) m.m4 (Spec.pick (Spec.is a 5) m.m5
+  (Spec.pick (Spec.is a 6) m.m6 m.m7))))))
+def Spec.write (m : Mem HwTy.El) (a : BitVec 3) (v : BitVec 8) : Mem HwTy.El :=
+  Mem.mk (Spec.pick (Spec.is a 0) v m.m0) (Spec.pick (Spec.is a 1) v m.m1) (Spec.pick (Spec.is a 2) v m.m2)
+    (Spec.pick (Spec.is a 3) v m.m3) (Spec.pick (Spec.is a 4) v m.m4) (Spec.pick (Spec.is a 5) v m.m5)
+    (Spec.pick (Spec.is a 6) v m.m6) (Spec.pick (Spec.is a 7) v m.m7)
+
+def Spec.next (s : Core HwTy.El) : BitVec 8 := BitVec.add s.pc (BitVec.ofNat 8 1)
+-- nothing on the UART (the data lines carry A, as in the hardware)
+def Spec.quiet (s : Core HwTy.El) : Act HwTy.El := Act.mk Spec.zero s.acc Spec.zero
+
+-- A takes a new value, PC moves on
+def Spec.setA (s : Core HwTy.El) (v : BitVec 8) : Core HwTy.El × Act HwTy.El :=
+  (Core.mk (Spec.next s) v s.mem s.leds, Spec.quiet s)
+def Spec.goto (s : Core HwTy.El) (t : BitVec 8) : Core HwTy.El × Act HwTy.El :=
+  (Core.mk t s.acc s.mem s.leds, Spec.quiet s)
+
+-- One instruction, given the UART's state: the next state and what is done to the
+-- UART. `out` waits (the state does not change) while the transmitter is busy, `inp`
+-- while no byte has arrived; `halt` stays where it is for ever.
+def Spec.exec (s : Core HwTy.El) (i : Instr) (p : Port HwTy.El) : Core HwTy.El × Act HwTy.El := match i with
+  | .halt => (s, Spec.quiet s)
+  | .ldi k => Spec.setA s k
+  | .ld a => Spec.setA s (Spec.read s.mem a)
+  | .st a => (Core.mk (Spec.next s) s.acc (Spec.write s.mem a s.acc) s.leds, Spec.quiet s)
+  | .addi k => Spec.setA s (BitVec.add s.acc k)
+  | .add a => Spec.setA s (BitVec.add s.acc (Spec.read s.mem a))
+  | .sub a => Spec.setA s (BitVec.sub s.acc (Spec.read s.mem a))
+  | .nand a => Spec.setA s (BitVec.not (BitVec.and s.acc (Spec.read s.mem a)))
+  | .jmp t => Spec.goto s t
+  | .jz t => Spec.goto s (Spec.pick (Spec.is s.acc 0) t (Spec.next s))
+  | .jnz t => Spec.goto s (Spec.pick (Spec.is s.acc 0) (Spec.next s) t)
+  | .out => (match BitVec.isTrue p.txReady with
+    | .true => (Core.mk (Spec.next s) s.acc s.mem s.leds, Act.mk Spec.one s.acc Spec.zero)
+    | .false => (s, Spec.quiet s))
+  | .inp => (match BitVec.isTrue p.rxFull with
+    | .true => (Core.mk (Spec.next s) p.rxByte s.mem s.leds, Act.mk Spec.zero s.acc Spec.one)
+    | .false => (s, Spec.quiet s))
+  | .led => (Core.mk (Spec.next s) s.acc s.mem (HwTy.El.slice 0 5 s.acc), Spec.quiet s)
+
+-- The program: instruction words (opcode * 256 + operand; `Asm.assemble` makes them),
+-- word k at address k, `halt` after the end.
+def Spec.word (prog : List Nat) (pc : BitVec 8) : Nat := Hdl.nthD 0 prog (BitVec.toNat pc)
+def Spec.fetch (prog : List Nat) (pc : BitVec 8) : Ins HwTy.El :=
+  Ins.mk (BitVec.ofNat 4 (Nat.div (Spec.word prog pc) 256)) (BitVec.ofNat 8 (Spec.word prog pc))
+
+-- The machine with an ideal serial line: the bytes still to be received and the bytes
+-- sent so far (in order). The transmitter is always ready; `inp` with nothing left
+-- to receive waits for ever.
+structure Arch where
+  core : Core HwTy.El
+  input : List Nat
+  output : List Nat
+
+def Spec.port (input : List Nat) : Port HwTy.El := match input with
+  | .nil => Port.mk Spec.one Spec.zero (BitVec.ofNat 8 0)
+  | .cons b bs => Port.mk Spec.one Spec.one (BitVec.ofNat 8 b)
+
+def Spec.rest (take : BitVec 1) (input : List Nat) : List Nat := match BitVec.isTrue take, input with
+  | .true, .cons b bs => bs
+  | _, _ => input
+
+def Spec.emit (a : Act HwTy.El) (output : List Nat) : List Nat := match BitVec.isTrue a.send with
+  | .true => List.append output (.cons (BitVec.toNat a.data) .nil)
+  | .false => output
+
+def Spec.after (m : Arch) (r : Core HwTy.El × Act HwTy.El) : Arch :=
+  Arch.mk r.1 (Spec.rest r.2.take m.input) (Spec.emit r.2 m.output)
+
+-- the architectural step: State → State
+def Spec.step (prog : List Nat) (m : Arch) : Arch :=
+  Spec.after m (Spec.exec m.core (Spec.decode (Spec.fetch prog m.core.pc)) (Spec.port m.input))
+
+def Spec.run (prog : List Nat) : Nat → Arch → Arch
+  | .zero, m => m
+  | .succ k, m => Spec.run prog k (Spec.step prog m)
+
+def Mem.zero : Mem HwTy.El := Mem.mk (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 8 0)
+  (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 8 0)
+def Core.init : Core HwTy.El := Core.mk (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) Mem.zero (BitVec.ofNat 5 0)
+def Arch.start (input : List Nat) : Arch := Arch.mk Core.init input .nil
+
+-- halted: the instruction at PC is a `halt`
+def Spec.haltedN : Nat → Bool
+  | .zero => .true
+  | .succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ (.succ _))))))))))))) => .true
+  | _ => .false
+def Spec.halted (prog : List Nat) (m : Arch) : Bool :=
+  Spec.haltedN (BitVec.toNat (Spec.fetch prog m.core.pc).op)
+
+------------------------------------------------------------------------------------
+-- 2. The hardware: one combinational step of the core.
+
+def memRead {r : HwTy → Type} [Hw r] (m : Mem r) (a : r B3) : r B8 :=
+  Hw.mux (eqLit a 0) m.m0 (Hw.mux (eqLit a 1) m.m1 (Hw.mux (eqLit a 2) m.m2
+  (Hw.mux (eqLit a 3) m.m3 (Hw.mux (eqLit a 4) m.m4 (Hw.mux (eqLit a 5) m.m5
+  (Hw.mux (eqLit a 6) m.m6 m.m7))))))
+
+-- every cell: written when `we` and the address is its own
+def memWrite {r : HwTy → Type} [Hw r] (m : Mem r) (we : r Bit) (a : r B3) (v : r B8) : Mem r :=
+  Mem.mk (Hw.mux we (Hw.mux (eqLit a 0) v m.m0) m.m0) (Hw.mux we (Hw.mux (eqLit a 1) v m.m1) m.m1)
+    (Hw.mux we (Hw.mux (eqLit a 2) v m.m2) m.m2) (Hw.mux we (Hw.mux (eqLit a 3) v m.m3) m.m3)
+    (Hw.mux we (Hw.mux (eqLit a 4) v m.m4) m.m4) (Hw.mux we (Hw.mux (eqLit a 5) v m.m5) m.m5)
+    (Hw.mux we (Hw.mux (eqLit a 6) v m.m6) m.m6) (Hw.mux we (Hw.mux (eqLit a 7) v m.m7) m.m7)
+
+-- The decoder: control signals from the opcode alone.
+structure Ctl (r : HwTy → Type) where
+  wA : r Bit      -- A is written
+  useMem : r Bit  -- the ALU's second operand is M[a] (else the constant)
+  aluSub : r Bit  -- the ALU subtracts
+  aluNand : r Bit -- the ALU computes nand
+  aluPass : r Bit -- the ALU passes its second operand (ldi, ld)
+  fromRx : r Bit  -- A is written from the UART (inp)
+  wM : r Bit      -- M[a] is written (st)
+  wL : r Bit      -- the LEDs are written
+  jmp : r Bit
+  jz : r Bit
+  jnz : r Bit
+  isOut : r Bit
+  isIn : r Bit
+  isHalt : r Bit
+
+def orL {r : HwTy → Type} [Hw r] : List (r Bit) → r Bit
+  | .nil => lo
+  | .cons b bs => bor b (orL bs)
+
+def decode {r : HwTy → Type} [Hw r] (op : r B4) : Ctl r :=
+  let ω is := fun (k : Nat) => eqLit op k;
+  Ctl.mk
+    (orL (.cons (is Op.ldi) (.cons (is Op.ld) (.cons (is Op.addi) (.cons (is Op.add)
+      (.cons (is Op.sub) (.cons (is Op.nand) (.cons (is Op.inp) .nil))))))))
+    (orL (.cons (is Op.ld) (.cons (is Op.add) (.cons (is Op.sub) (.cons (is Op.nand) .nil)))))
+    (is Op.sub)
+    (is Op.nand)
+    (bor (is Op.ldi) (is Op.ld))
+    (is Op.inp)
+    (is Op.st)
+    (is Op.led)
+    (is Op.jmp)
+    (is Op.jz)
+    (is Op.jnz)
+    (is Op.out)
+    (is Op.inp)
+    (orL (.cons (is Op.halt) (.cons (is 14) (.cons (is 15) .nil))))
+
+-- The ALU: A + b, A - b, nand, or b itself.
+def alu {r : HwTy → Type} [Hw r] (c : Ctl r) (a b : r B8) : r B8 :=
+  Hw.mux c.aluPass b (Hw.mux c.aluNand (Hw.not (Hw.and a b)) (Hw.mux c.aluSub (Hw.sub a b) (Hw.add a b)))
+
+-- One cycle of the core: the instruction `i` (from the ROM at PC), the UART's state
+-- `p`; the next state and the action on the UART.
+--
+-- An instruction "completes" (`go`) unless it is `out` with the transmitter busy, `inp`
+-- with no byte, or `halt`; only a completing instruction changes the state. The zero
+-- test of A and the memory address are used only as multiplexer selects (docs/cpu.md,
+-- "the proof", says why).
+def coreStep {r : HwTy → Type} [Hw r] (s : Core r) (i : Ins r) (p : Port r) : r (HwTy.prod Core.code Act.code) :=
+  let ω c := decode i.op;
+  let a := Hw.slice 0 3 i.arg;
+  let b := Hw.mux c.useMem (memRead s.mem a) i.arg;
+  let next := inc s.pc;
+  let go := Hw.label "go" (Hw.mux c.isOut p.txReady (Hw.mux c.isIn p.rxFull (bnot c.isHalt)));
+  let target := Hw.mux c.jmp i.arg (Hw.mux c.jz (Hw.mux (eqLit s.acc 0) i.arg next)
+    (Hw.mux c.jnz (Hw.mux (eqLit s.acc 0) next i.arg) next));
+  let accNew := Hw.mux c.fromRx p.rxByte (alu c s.acc b);
+  Hw.pair
+    (Core.pack (Core.mk
+      (Hw.mux go target s.pc)
+      (Hw.mux go (Hw.mux c.wA accNew s.acc) s.acc)
+      (memWrite s.mem (band go c.wM) a s.acc)
+      (Hw.mux (band go c.wL) (Hw.slice 0 5 s.acc) s.leds)))
+    (Act.pack (Act.mk (band go c.isOut) s.acc (band go c.isIn)))
+
+------------------------------------------------------------------------------------
+-- 3. The board design.
+
+-- The program ROM: word k of the list at address k, 0 (`halt`) elsewhere; a chain of
+-- multiplexers on constants, which yosys turns into LUTs (docs/cpu.md: why not BRAM).
+def romW {r : HwTy → Type} [Hw r] (pc : r B8) : Nat → List Nat → r B12
+  | _, .nil => Hw.lit 12 0
+  | k, .cons w ws => Hw.mux (eqLit pc k) (Hw.lit 12 w) (romW pc (Nat.succ k) ws)
+
+def fetch {r : HwTy → Type} [Hw r] (prog : List Nat) (pc : r B8) : Ins r :=
+  let w := Hw.label "ins" (romW pc 0 prog);
+  Ins.mk (Hw.slice 8 4 w) (Hw.slice 0 8 w)
+
+-- The core, the UART (synchroniser, receiver, transmitter, `n` cycles per bit) and a
+-- one-byte receive buffer (`full`, `byte`; a byte that arrives while it is full
+-- replaces the waiting one). The LEDs show the LED latch; LED5 is its bit 4.
+structure CpuSys (r : HwTy → Type) where
+  sync : Sync r
+  rx : Rx r
+  tx : Tx r
+  full : r Bit
+  byte : r B8
+  core : Core r
+  deriving Bundle
+
+def cpuStep {r : HwTy → Type} [Hw r] (n : Nat) (prog : List Nat) (s : CpuSys r) (x : Pins r) :
+    r (HwTy.prod CpuSys.code Board.code) :=
+  let rr := rxStep n s.rx s.sync.ff2;
+  let got := Byte.unpack (Hw.snd rr);
+  let cr := coreStep s.core (fetch prog s.core.pc) (Port.mk (txIdle s.tx) s.full s.byte);
+  let act := Act.unpack (Hw.snd cr);
+  Hw.pair
+    (CpuSys.pack (CpuSys.mk (Sync.unpack (syncStep s.sync x.uart_rx)) (Rx.unpack (Hw.fst rr))
+      (Tx.unpack (txStep n s.tx act.send act.data))
+      (Hw.mux got.valid hi (Hw.mux act.take lo s.full))
+      (Hw.mux got.valid got.data s.byte)
+      (Core.unpack (Hw.fst cr))))
+    (board s.tx.line s.core.leds)
+
+def CpuSys.init : CpuSys HwTy.El :=
+  CpuSys.mk Sync.init Rx.init Tx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) Core.init
+
+def cpu (n : Nat) (prog : List Nat) : Circuit Pins.code Board.code :=
+  Circuit.bundled CpuSys.bundle Pins.bundle Board.bundle CpuSys.init (cpuStep n prog)

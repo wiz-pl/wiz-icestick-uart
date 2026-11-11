@@ -55,6 +55,13 @@ transmitter, receiver, input synchroniser). Every register is named after its fi
 
 The clock is 12 MHz, so timing is not a concern.
 
+**A toy CPU.** `src/Icestick/Cpu.wiz` is a minimal 8-bit accumulator processor (fourteen
+instructions, eight bytes of memory, the LEDs and the UART), specified as a pure step
+function and proved equal to its circuit cycle by cycle; `src/Icestick/Asm.wiz` is its
+assembler. Three more designs run its example programs: `cpu_count` (counts on the
+LEDs), `cpu_echo` (sends back each byte plus one) and `cpu_hi` (sends `hi\r\n`). See
+[docs/cpu.md](docs/cpu.md).
+
 **The protocol of `proto`.** The host sends a line: any bytes except 0x0A, then 0x0A.
 The board answers with the CRC-8 of the line's bytes (polynomial 0x07, initial value 0:
 CRC-8/SMBUS) as two upper-case hexadecimal digits and 0x0A. `123456789` gives `F4`;
@@ -211,6 +218,8 @@ src/Icestick/Gates.wiz   small vocabulary over the HDL library
 src/Icestick/Uart.wiz    baud divider, transmitter, receiver, synchroniser
 src/Icestick/Crc.wiz     CRC-8 as hardware and as a specification
 src/Icestick/Designs.wiz blinky, hello, echo, proto; the loopback circuit
+src/Icestick/Cpu.wiz     the toy CPU: architecture and circuit (docs/cpu.md)
+src/Icestick/Asm.wiz     its assembler and example programs
 src/Icestick/Wave.wiz    waveforms, a software receiver, the simulator loop, test data
 src/Icestick/Board.wiz   pins, the list of designs, scenarios
 src/Icestick/Proofs*     the proofs
