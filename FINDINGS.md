@@ -292,6 +292,11 @@ Wanted: a `Package.command`/rule target (inputs, outputs, command line), and
   million cycles of the blaster, or one frame of the encoder at the board's timing (1.1
   million cycles), do not fit, so those checks live in `icestick gen` and the test uses
   the faster timing. A per-test limit (`-- test: run 600`) would do.
+* **Observation (not about Wiz): an LG TV acts on its power toggle only when the key
+  is held.** On the TV tested, `on` (0xC4) and `off` (0xC5) worked as a single NEC frame;
+  `power` (0x08) did nothing as a single frame and toggled the TV as a frame followed by
+  four repeat codes (0.54 s), 2026-11-11 21:45:41. Code lists give the codes but not
+  this; the design sends the repeats for `power` by default.
 * **B5 (bug, performance). A step function over a bundle with many fields compiles
   very slowly.** With 19 fields in `Blaster` (five of them nested bundles), `#ir
   blasterStep` took more than 5 minutes and grail's `ir` job for the driver more than 30

@@ -131,8 +131,8 @@ after 50 µs to 300 µs of TXD high). A unit is 6750 cycles exactly. A frame (LG
 units, 68 ms) is followed by a 40-unit gap, or by repeat codes (16 units on, 4 off, 1 on:
 what a remote sends while a key is held), each starting 192 units (108 ms) after the
 one before. On an LG TV that answered `on` and `off`, a single `power` frame did
-nothing, which is why `power` sends a frame and four repeat codes (0.5 s, a short
-press); `hold N` gives every command N of them.
+nothing, and a frame with four repeat codes (0.54 s, a short press) toggled it: that is
+what `power` sends; `hold N` gives every command N of them.
 
 How well that works is for a TV to say. The LED emits at 870 nm to 910 nm, where TV
 receivers (tuned to 940 nm) are less sensitive, but it is bright (radiant intensity 50
@@ -249,8 +249,9 @@ sees a 940 nm remote (`listen` with an LG remote a few centimetres away will tel
 
 With an LG TV in front of the board (the user watching): `on` and `off` switched it on
 and off; a single `power` frame did nothing. Hence the repeat codes. Second version
-(1222 cells), 21:45:41: `power` → `sent 04 FB 08 F7 (20DF10EF) +4, echo ok`; the TV's
-reaction to the five-code press had not been reported when this was written.
+(1222 cells), 21:45:41: `power` → `sent 04 FB 08 F7 (20DF10EF) +4, echo ok`, and the
+TV toggled. So this LG TV needs the power toggle held (a frame and repeat codes), while
+the discrete POWER ON and POWER OFF codes work as a single frame.
 
 ### Without a board
 
