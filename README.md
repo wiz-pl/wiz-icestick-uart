@@ -55,6 +55,7 @@ transmitter, receiver, input synchroniser). Every register is named after its fi
 | `ir` | the IR blaster: see below (`src/Icestick/Blaster.wiz`) | 1202 | 44 MHz |
 | `oled` | the OLED demo for the PmodOLED (128 × 32): see below (`src/Icestick/Demo.wiz`) | 730 | 53 MHz |
 | `oled64` | the same for a 128 × 64 SSD1306 module | 758 | 49 MHz |
+| `oledrgb` | the OLED demo in colour for the PmodOLEDrgb (SSD1331, 96 × 64): see below (`src/Icestick/DemoRgb.wiz`) | 938 | 43 MHz |
 
 The clock is 12 MHz, so timing is not a concern.
 
@@ -233,6 +234,52 @@ command table, are complete and leave the controller as wanted (and so do the fr
 headers after them); the power-up's steps are in the order the PmodOLED manual and the
 SSD1306 datasheet ask, and the waits are at least 1 ms and 100 ms at 12 MHz.
 
+## The colour OLED demo
+
+The same demo on a Digilent PmodOLEDrgb: an SSD1331 controller, 96 × 64 pixels, 16-bit
+colour (RGB 565), on J2 with the same pin numbers (J1 of the PmodOLEDrgb: 1 CS, 2 MOSI,
+4 SCK, 7 D/C, 8 RES, 9 VCCEN, 10 PMODEN; VCCEN and PMODEN switch the supplies on when
+high). `src/Icestick/OledRgb.wiz` (commands, program, controller), `FxRgb.wiz` (the
+effects), `DemoRgb.wiz` (the design), `OledRgbSim.wiz` (pins, SSD1331 model, reference
+frames, PPM).
+
+| effect | in colour |
+|---|---|
+| plasma | the sum of the four sines through a rainbow palette (red, green and blue are three sines a third of a period apart), cycling |
+| stars | the three layers: far ones dim and coloured, middle ones coloured, near ones white |
+| scroller | `WIZ ON ICE40` in rainbow colours that run along the text, over the stars |
+| XOR | (u xor v) through the palette, alternate bands at half brightness, panning round a circle |
+
+Each effect gives a shade (black, palette, half palette, white) and a palette index per
+pixel, and a single palette makes the colour, so the wipe between two effects is a
+multiplexer. A pixel is two bytes (high first), computed when its first byte goes out; a
+frame is 12288 bytes, 196608 cycles at 6 MHz (the SSD1331 allows 150 ns per bit), one
+every 2^18 cycles (45.8 frames a second), the frame counter stepping by 2 so the effects
+move as on the monochrome panel; 256 frames (5.6 s) per effect.
+
+**Power-up** (`RProg.init`; PmodOLEDrgb reference manual: apply VCC, display off,
+initialise, clear the screen, VCCEN, 100 ms, display on; the settings of Digilent's
+driver): PMODEN high, 20 ms; RES low 1 ms (at least 3 µs), high, 1 ms; FD 12 (unlock),
+AE, A0 72 (65k colours, column 95 at SEG0, COM backwards, odd/even split), A1 00, A2 00,
+A4, A8 3F, AD 8E, B0 0B, B1 31, B3 F0, 8A 64, 8B 78, 8C 64, BB 3A, BE 3E, 87 06, 81 91,
+82 50, 83 7D, 2E; the window 15 00 5F, 75 00 3F and a black frame; VCCEN high, 100 ms;
+AF. Every frame: CS high until the tick, the window again, 12288 data bytes.
+
+```sh
+.grail/bin/oled all oledrgb oledrgb_fast   # simulate, check frames, synthesise
+.grail/bin/oled flash oledrgb
+.grail/bin/oled look rgb 108 539 1078      # colour pictures without the circuit
+```
+
+`oled gen` checks `oledrgb_fast` (waits of 50, 40 and 200 cycles, frames back to back,
+the frame counter stepping by 539: frames 1 … 4 show stars and the scroller wiping in,
+the XOR pattern, the plasma) through a model of the SSD1331 (the datasheet's command
+table with its argument counts, every byte with D/C low a command byte; data bytes in
+pairs into the window), and the first 270000 cycles of `oledrgb` (to the end of the
+initialisation commands): the power-up order and times, the command bytes, the
+controller's registers, and every pixel of every frame against the effects evaluated
+directly. The frames are written as PPM pictures, `build/frames/oledrgb_fast_K_tT.ppm`.
+
 ## Building
 
 You need Nix with flakes. `nix develop` gives a shell with `wiz`, `grail` (from the
@@ -339,6 +386,15 @@ sees a 940 nm remote (`listen` with an LG remote a few centimetres away will tel
 Flashed `oled` (commit 3d1fbbe; 730 of 1280 logic cells, no block RAM, 53 MHz by
 nextpnr, 52 MHz by icetime) at 21:15 (+02:00): iceprog wrote and verified it. What the
 display shows was not seen from here (no camera).
+
+### The colour OLED demo on the board (2026-11-11)
+
+The module turned out to be a **PmodOLEDrgb** (SSD1331, 96 × 64, 16-bit colour), not a
+PmodOLED, so the demo was ported (`oledrgb`). Flashed `oledrgb` (commit dba7311; 938 of
+1280 logic cells, no block RAM, 43 MHz by nextpnr, 40 MHz by icetime) at 21:49 (+02:00),
+on J2: **the demo works on the real panel** (the user's report: the effects run in
+colour). It was flashed before any simulation of it, at the user's request; the
+simulations and proofs below were run afterwards.
 
 ### Without a board
 

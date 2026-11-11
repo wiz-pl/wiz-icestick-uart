@@ -342,6 +342,19 @@ A demo for an SSD1306 OLED (Digilent PmodOLED, 128 × 32) on the Pmod connector:
   definition that failed to elaborate report "no field 'go' in a value of type Type"
   (like P6) rather than "this definition has errors".
 
+* **The colour port (`oledrgb`, SSD1331).** The module was a PmodOLEDrgb after all.
+  The port reused the serialiser and the effects' building blocks unchanged; the
+  controller's state is five small bundles (sequencer, pins, frame timing, pixel
+  position, serialiser) instead of one structure of thirteen fields, following the IR
+  project's experience that large structures make the compiler crawl. It was written,
+  synthesised (938 cells) and flashed in about an hour, **without any simulation, and
+  worked on the panel the first time**. The datasheet-level program (a list of named
+  steps and commands) and the reuse of the parts that the monochrome design had already
+  had simulated and proved carried it. A frame of 12288 bytes is 196608 cycles: at G20's
+  2000 cycles a second, eight minutes of value simulation for four frames, the same
+  again on the netlist; so `look rgb` (the effects evaluated directly) was what was used
+  to judge the colours.
+
 ## Papercuts
 
 * **P1. Error messages are not bounded.** A mismatch that involves an equation between
