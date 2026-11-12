@@ -338,6 +338,13 @@ Wanted: a `Package.command`/rule target (inputs, outputs, command line), and
   million cycles of the blaster, or one frame of the encoder at the board's timing (1.1
   million cycles), do not fit, so those checks live in `icestick gen` and the test uses
   the faster timing. A per-test limit (`-- test: run 600`) would do.
+  **Known flake (wiz 50cd3e7):** tests/ir.wiz itself is now close to the limit. It ran
+  for about 51 s from the old source and about 54 s from the operator rewrite (two runs
+  each, under `heavy` on a shared machine, so informal), and one `grail test` run on
+  `cleanup-ops` timed out at 60 s. Grail at the pinned commit has neither a
+  `--test-timeout` flag nor a per-test setting (`timeout 60` is hard-coded in
+  Grail/Test.lean), so the limit cannot be raised here. To fix when re-pinning: raise the
+  limit for this test once grail supports it, or split tests/ir.wiz into smaller tests.
 * **Observation (not about Wiz): an LG TV acts on its power toggle only when the key
   is held.** On the TV tested, `on` (0xC4) and `off` (0xC5) worked as a single NEC frame;
   `power` (0x08) did nothing as a single frame and toggled the TV as a frame followed by
