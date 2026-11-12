@@ -318,6 +318,12 @@ blobs`; `oled look sphere T…` and `oled look blobs T…` render frames without
   outlines are true circles) through the smooth minimum (its correction term from a
   17-entry table). Shaded by the nearer ball's normal; no floor (it did not fit).
 
+**What is checked.** `sphere` and `sphere_fast` pass `oled gen` (values against the
+netlist, the power-up commands, and for `sphere_fast` four frames pixel by pixel against
+the reference) and `oled sim` (Icarus Verilog). `blobs` is verified on the panel only:
+it has no fast scenario (no `blobs_fast`), and its circuit simulation was not run (on
+its branch or at the merge into master).
+
 ## Building
 
 You need Nix with flakes. `nix develop` gives a shell with `wiz`, `grail` (from the
