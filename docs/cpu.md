@@ -128,7 +128,7 @@ multiplexers disappear. What is left are terms in the symbolic state, and they m
 only if both sides compute them the same way, so two things are written with care:
 
 * the hardware uses the two data-dependent conditions, "A = 0" and "the address is
-  `j`", only as multiplexer selects (`Hw.mux (eqLit s.acc 0) …`), never combined with
+  `j`", only as multiplexer selects (`if s.acc === 0 then … else …`), never combined with
   other logic, and
 * the architecture writes those two conditions with `Spec.pick` (the value instance's
   multiplexer) and `Spec.is`; the rest of `Spec.exec` is ordinary code over an

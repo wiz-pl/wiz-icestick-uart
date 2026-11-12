@@ -136,6 +136,15 @@ def genSome (names : List String) : EIO Unit := do
 
 def gen : EIO Unit := genSome .nil
 
+-- `quick NAME…`: the Verilog and the pin constraints only, no simulation
+def quickDesign (d : Design) : EIO Unit := do
+  let net := Design.netlist d;
+  check (d.name <+> ": every port has its pin, every pin its port") (match Pcf.check net (Top.pins d.name) with
+    | .nil => .true
+    | _ => .false);
+  FS.writeFile (build (d.name <+> ".pcf")) (Pcf.emit net Board.clk (Top.pins d.name));
+  FS.writeFile (build (d.name <+> ".v")) (Verilog.emit net)
+
 -- replay a trace on Verilog sources with Icarus Verilog
 def replay (std label name : String) (sources : List String) : EIO Unit := do
   tool "iverilog" (.cons std (.cons "-o" (.cons (build (name <+> label <+> ".vvp"))
@@ -324,7 +333,7 @@ def irtest (port : String) : EIO Unit := do
 ------------------------------------------------------------------------------------
 
 def usage : String :=
-  "usage: icestick gen | sim | bit | postsim | all | flash NAME | test [PORT [LINES [TENTHS]]] | fake PORT | irtest [PORT]"
+  "usage: icestick gen | sim | bit | postsim | all | quick [NAME…] | flash NAME | test [PORT [LINES [TENTHS]]] | fake PORT | irtest [PORT]"
 
 def sim : EIO Unit := EIO.forEach simDesign Top.designs
 def bit : EIO Unit := EIO.forEach bitDesign Top.designs
@@ -348,10 +357,11 @@ def run : List String → EIO Unit
       | _, _, _, .true => (match rest with
         | .cons port _ => fake port
         | .nil => EIO.fail usage)
-      | _, _, _, _ => match String.eq cmd "irtest", rest with
-        | .true, .cons port _ => irtest port
-        | .true, .nil => irtest defaultPort
-        | .false, _ => EIO.fail usage)
+      | _, _, _, _ => match String.eq cmd "irtest", String.eq cmd "quick", rest with
+        | .true, _, .cons port _ => irtest port
+        | .true, _, .nil => irtest defaultPort
+        | _, .true, _ => EIO.bind (ensureDir "build") (fun u => EIO.forEach quickDesign (Top.pick rest Top.designs))
+        | _, _, _ => EIO.fail usage)
   | .nil => EIO.fail usage
 
 def main : IO Unit := EIO.toIO (EIO.bind (EIO.lift IO.args) run)

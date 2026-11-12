@@ -41,23 +41,23 @@ def demoStep {r : HwTy → Type} [Hw r] (c : OledCfg) (n : Nat) (rom : RomT) (s 
     : r (HwTy.prod (Demo.code c.frameLog) OledBoard.code) :=
   let cs := s.ctl;
   let t := cs.t;
-  let e := Hw.mux s.lock s.sel (Hw.slice 9 2 t);
+  let e := if s.lock then s.sel else Hw.slice 9 2 t;
   let lt := Hw.slice 0 9 t;
   let pix := demoPixel c.rows e (Gen.x cs.gen) (Gen.y cs.gen) lt;
   -- the key: 48 … 52 ('0' … '4')
   let rr := rxStep n s.rx s.sync.ff2;
   let got := Byte.unpack (Hw.snd rr);
   let d := got.data;
-  let digit := band got.valid (band (eqLit (Hw.slice 3 5 d) 6) (Hw.ult (Hw.slice 0 3 d) (Hw.lit 3 5)));
+  let digit := got.valid &&& (Hw.slice 3 5 d === 6 &&& Hw.slice 0 3 d <ᵤ 5);
   -- the LEDs: brightness 0 … 15 against the low bits of the frame timer
   let level := Hw.slice 1 4 (sin6 (Hw.cat (Hw.slice 0 5 t) lo));
-  let on := Hw.ult (Hw.slice 0 4 cs.timer) level;
-  let oneHot := Hw.cat (band (eqLit e 3) on) (Hw.cat (band (eqLit e 2) on) (Hw.cat (band (eqLit e 1) on) (band (eqLit e 0) on)));
+  let on := Hw.slice 0 4 cs.timer <ᵤ level;
+  let oneHot := Hw.cat (e === 3 &&& on) (Hw.cat (e === 2 &&& on) (Hw.cat (e === 1 &&& on) (e === 0 &&& on)));
   Hw.pair
     (Demo.pack c.frameLog (Demo.mk (Ctl.unpack c.frameLog (ctlStep c rom cs pix))
       (Sync.unpack (syncStep s.sync x.uart_rx)) (Rx.unpack (Hw.fst rr))
-      (Hw.mux digit (bnot (eqLit (Hw.slice 0 3 d) 0)) s.lock)
-      (Hw.mux digit (dec (Hw.slice 0 2 d)) s.sel)))
+      (if digit then Hw.slice 0 3 d =/= 0 else s.lock)
+      (if digit then Hw.slice 0 2 d - 1 else s.sel)))
     (OledBoard.pack (OledBoard.mk hi (Hw.cat (ctlShowing c cs) oneHot)
       cs.cs cs.spi.mosi cs.spi.sclk cs.dc cs.res cs.vbat cs.vdd))
 

@@ -6,19 +6,19 @@ import Icestick.Gates
 -- one bit: shift left, and subtract the polynomial if a one fell out
 def crcBit {r : HwTy → Type} [Hw r] (c : r B8) : r B8 :=
   let sh := shl1 c;
-  Hw.mux (Hw.slice 7 1 c) (Hw.xor sh (Hw.lit 8 7)) sh
+  if Hw.slice 7 1 c then sh ^^^ 7 else sh
 
 def crcIter {r : HwTy → Type} [Hw r] : Nat → r B8 → r B8
   | .zero, c => c
   | .succ k, c => crcIter k (crcBit c)
 
 -- the CRC after one more byte `d`: eight copies of `crcBit`, unrolled
-def crcStep {r : HwTy → Type} [Hw r] (c d : r B8) : r B8 := crcIter 8 (Hw.xor c d)
+def crcStep {r : HwTy → Type} [Hw r] (c d : r B8) : r B8 := crcIter 8 (c ^^^ d)
 
 -- a nibble as an ASCII hexadecimal digit (upper case)
 def hexDigit {r : HwTy → Type} [Hw r] (nib : r B4) : r B8 :=
   let z := Hw.cat (Hw.lit 4 0) nib;
-  Hw.mux (Hw.ult nib (Hw.lit 4 10)) (Hw.add z (Hw.lit 8 48)) (Hw.add z (Hw.lit 8 55))
+  if nib <ᵤ 10 then z + 48 else z + 55
 
 ------------------------------------------------------------------------------------
 -- The specification, on numbers.

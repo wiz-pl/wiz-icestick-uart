@@ -46,7 +46,7 @@ structure BScene (r : HwTy → Type) where
   z2 : r D12
 
 -- s − 16 for a sine 0 … 31, as 12 bits
-def sgn12 {r : HwTy → Type} [Hw r] (v : r D5) : r D12 := Hw.sub (zext 7 v) (Hw.lit 12 16)
+def sgn12 {r : HwTy → Type} [Hw r] (v : r D5) : r D12 := zext 7 v - 16
 def q4 {r : HwTy → Type} [Hw r] (v : r D12) : r D12 := Hw.cat (Hw.slice 0 10 v) (Hw.lit 2 0)
 
 -- The balls swing through each other along x (amplitude 16 pixels) while circling in
@@ -57,26 +57,26 @@ def BScene.at {r : HwTy → Type} [Hw r] (t : r D9) : BScene r :=
   let u := sgn12 (sin6 p);
   let w2 := sgn12 (sin6 (Hw.cat (Hw.slice 0 5 p) lo));
   let w := Hw.cat (Hw.slice 11 1 w2) (Hw.slice 1 11 w2);
-  let v := Hw.sub (zext 9 (Hw.slice 2 3 (sin6 (Hw.add p (Hw.lit 6 16))))) (Hw.lit 12 4);
-  let c := fun (base : Nat) (d : r D12) => q4 (Hw.add (Hw.lit 12 base) d);
-  let m := fun (base : Nat) (d : r D12) => q4 (Hw.sub (Hw.lit 12 base) d);
+  let v := zext 9 (Hw.slice 2 3 (sin6 (p + 16))) - 4;
+  let c := fun (base : Nat) (d : r D12) => q4 (Hw.lit 12 base + d);
+  let m := fun (base : Nat) (d : r D12) => q4 (Hw.lit 12 base - d);
   BScene.mk (c 48 u) (c 22 v) (c 64 w) (m 48 u) (m 22 v) (m 64 w)
 
 def neg12 {r : HwTy → Type} [Hw r] (a : r D12) : r Bit := Hw.slice 11 1 a
-def abs12 {r : HwTy → Type} [Hw r] (a : r D12) : r D12 := Hw.mux (neg12 a) (Hw.sub (Hw.lit 12 0) a) a
-def max12 {r : HwTy → Type} [Hw r] (a b : r D12) : r D12 := Hw.mux (Hw.ult a b) b a
+def abs12 {r : HwTy → Type} [Hw r] (a : r D12) : r D12 := if neg12 a then -a else a
+def max12 {r : HwTy → Type} [Hw r] (a b : r D12) : r D12 := if a <ᵤ b then b else a
 def shr1 {r : HwTy → Type} [Hw r] (a : r D12) : r D12 := zext 1 (Hw.slice 1 11 a)
 def shr3 {r : HwTy → Type} [Hw r] (a : r D12) : r D12 := zext 3 (Hw.slice 3 9 a)
 def shr4 {r : HwTy → Type} [Hw r] (a : r D12) : r D12 := zext 4 (Hw.slice 4 8 a)
 -- signed less-than
 def slt12 {r : HwTy → Type} [Hw r] (a b : r D12) : r Bit :=
-  Hw.ult (Hw.xor a (Hw.lit 12 2048)) (Hw.xor b (Hw.lit 12 2048))
-def smin12 {r : HwTy → Type} [Hw r] (a b : r D12) : r D12 := Hw.mux (slt12 a b) a b
+  (a ^^^ 2048) <ᵤ (b ^^^ 2048)
+def smin12 {r : HwTy → Type} [Hw r] (a b : r D12) : r D12 := if slt12 a b then a else b
 
 -- the length of (a, c), a, c ≥ 0, from below: max(a, c, 11/16 (a + c))
 def norm2 {r : HwTy → Type} [Hw r] (a c : r D12) : r D12 :=
-  let s := Hw.add a c;
-  max12 (max12 a c) (Hw.add (shr1 s) (Hw.add (shr3 s) (shr4 s)))
+  let s := a + c;
+  max12 (max12 a c) (shr1 s + (shr3 s + shr4 s))
 
 -- max(k − |a − b|, 0)² / (4k) with k = 64 units (16 pixels), by g = k − |a − b|
 -- quartered (0 … 16): (4i)² / 256
@@ -133,55 +133,55 @@ def StageA.init : StageA HwTy.El :=
     (ARoot.mk (BitVec.ofNat 14 0) (BitVec.ofNat 14 0) (BitVec.ofNat 14 0) (BitVec.ofNat 5 31))
     (AOut.mk (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 8 255) (BitVec.ofNat 8 255))
 
-def abs8b {r : HwTy → Type} [Hw r] (a : r D8) : r D8 := Hw.mux (Hw.slice 7 1 a) (Hw.sub (Hw.lit 8 0) a) a
-def far8 {r : HwTy → Type} [Hw r] (a : r D8) : r Bit := bnot (eqLit (Hw.slice 5 3 (abs8b a)) 0)
+def abs8b {r : HwTy → Type} [Hw r] (a : r D8) : r D8 := if Hw.slice 7 1 a then -a else a
+def far8 {r : HwTy → Type} [Hw r] (a : r D8) : r Bit := Hw.slice 5 3 (abs8b a) =/= 0
 
 -- cycle 0: start (ball 1's magnitudes in); 1 … 5 square; 6 × 4 and the root's start;
 -- 7 … 13 root (half pixels); 14 ρ1 out, ball 2's magnitudes in; 15 … 19 square; 20;
 -- 21 … 27 root; 28 ρ2 out; then idle
 def stageAStep {r : HwTy → Type} [Hw r] (s : StageA r) (start : r Bit) (tx : r D7) (ty : r D6) (sc : BScene r) : r StageA.code :=
   let px := fun (v : r D12) => Hw.slice 2 8 v;
-  let ndx1 := Hw.sub (zext 1 tx) (px sc.x1);
-  let ndy1 := Hw.sub (zext 2 ty) (px sc.y1);
-  let ndx2 := Hw.sub (zext 1 tx) (px sc.x2);
-  let ndy2 := Hw.sub (zext 2 ty) (px sc.y2);
+  let ndx1 := zext 1 tx - px sc.x1;
+  let ndy1 := zext 2 ty - px sc.y1;
+  let ndx2 := zext 1 tx - px sc.x2;
+  let ndy2 := zext 2 ty - px sc.y2;
   let q := s.sq;
   let rt := s.rt;
   let o := s.out;
   let c := rt.cnt;
-  let inR := fun (lo hi : Nat) => band (bnot (Hw.ult c (Hw.lit 5 lo))) (Hw.ult c (Hw.lit 5 (hi + 1)));
-  let squaring := bor (inR 1 5) (inR 15 19);
-  let six := bor (eqLit c 6) (eqLit c 20);
-  let rooting := bor (inR 7 13) (inR 21 27);
-  let load2 := eqLit c 14;
-  let pick := fun (b : r Bit) (v : r D10) => Hw.mux b (zext 3 v) (Hw.lit 13 0);
-  let trial := Hw.add rt.h2 (Hw.add rt.dd rt.ee);
-  let fits := bnot (Hw.ult (zext 1 q.acc) trial);
+  let inR := fun (lo hi : Nat) => c ≥ᵤ Hw.ofNat lo &&& c <ᵤ Hw.ofNat (hi + 1);
+  let squaring := inR 1 5 ||| inR 15 19;
+  let six := c === 6 ||| c === 20;
+  let rooting := inR 7 13 ||| inR 21 27;
+  let load2 := c === 14;
+  let pick := fun (b : r Bit) (v : r D10) => if b then zext 3 v else 0;
+  let trial := rt.h2 + (rt.dd + rt.ee);
+  let fits := zext 1 q.acc ≥ᵤ trial;
   let shl := fun (v : r D10) => Hw.cat (Hw.slice 0 9 v) lo;
   let shr := fun (v : r D5) => Hw.cat lo (Hw.slice 1 4 v);
   let m1x := Hw.slice 0 5 (abs8b o.dx2);
   let m1y := Hw.slice 0 5 (abs8b o.dy2);
   -- ρ in quarter pixels: twice the root of 4 r²
-  let rho := fun (far : r Bit) => Hw.mux far (Hw.lit 8 255) (Hw.cat (Hw.slice 0 7 rt.dd) lo);
+  let rho := fun (far : r Bit) => if far then 255 else Hw.cat (Hw.slice 0 7 rt.dd) lo;
   StageA.pack (StageA.mk
     (ASq.mk
-      (Hw.mux start (Hw.slice 0 5 (abs8b ndx1)) (Hw.mux load2 m1x (shr q.mx)))
-      (Hw.mux start (Hw.slice 0 5 (abs8b ndy1)) (Hw.mux load2 m1y (shr q.my)))
-      (Hw.mux start (zext 5 (Hw.slice 0 5 (abs8b ndx1))) (Hw.mux load2 (zext 5 m1x) (shl q.sx)))
-      (Hw.mux start (zext 5 (Hw.slice 0 5 (abs8b ndy1))) (Hw.mux load2 (zext 5 m1y) (shl q.sy)))
-      (Hw.mux (bor start load2) (Hw.lit 13 0)
-        (Hw.mux six (Hw.cat (Hw.slice 0 11 q.acc) (Hw.lit 2 0))
-          (Hw.add q.acc (Hw.add (pick (Hw.slice 0 1 q.mx) q.sx) (pick (Hw.slice 0 1 q.my) q.sy))))))
+      (if start then Hw.slice 0 5 (abs8b ndx1) else if load2 then m1x else shr q.mx)
+      (if start then Hw.slice 0 5 (abs8b ndy1) else if load2 then m1y else shr q.my)
+      (if start then zext 5 (Hw.slice 0 5 (abs8b ndx1)) else if load2 then zext 5 m1x else shl q.sx)
+      (if start then zext 5 (Hw.slice 0 5 (abs8b ndy1)) else if load2 then zext 5 m1y else shl q.sy)
+      (if start ||| load2 then 0
+        else if six then Hw.cat (Hw.slice 0 11 q.acc) (Hw.lit 2 0)
+          else q.acc + (pick (Hw.slice 0 1 q.mx) q.sx + pick (Hw.slice 0 1 q.my) q.sy)))
     (ARoot.mk
-      (Hw.mux six (Hw.lit 14 0) (Hw.mux (band rooting fits) trial rt.h2))
-      (Hw.mux six (Hw.lit 14 0) (Hw.mux rooting
-        (Hw.add (Hw.cat lo (Hw.slice 1 13 rt.dd)) (Hw.mux fits rt.ee (Hw.lit 14 0))) rt.dd))
-      (Hw.mux six (Hw.lit 14 4096) (Hw.cat (Hw.lit 2 0) (Hw.slice 2 12 rt.ee)))
-      (Hw.mux start (Hw.lit 5 1) (Hw.mux (eqLit c 31) c (inc c))))
+      (if six then 0 else if rooting &&& fits then trial else rt.h2)
+      (if six then 0 else if rooting then
+        Hw.cat lo (Hw.slice 1 13 rt.dd) + (if fits then rt.ee else 0) else rt.dd)
+      (if six then 4096 else Hw.cat (Hw.lit 2 0) (Hw.slice 2 12 rt.ee))
+      (if start then 1 else if c === 31 then c else c + 1))
     (AOut.mk
-      (Hw.mux start ndx1 o.dx1) (Hw.mux start ndy1 o.dy1) (Hw.mux start ndx2 o.dx2) (Hw.mux start ndy2 o.dy2)
-      (Hw.mux (eqLit c 14) (rho (bor (far8 o.dx1) (far8 o.dy1))) o.rho1)
-      (Hw.mux (eqLit c 28) (rho (bor (far8 o.dx2) (far8 o.dy2))) o.rho2)))
+      (if start then ndx1 else o.dx1) (if start then ndy1 else o.dy1) (if start then ndx2 else o.dx2) (if start then ndy2 else o.dy2)
+      (if c === 14 then rho (far8 o.dx1 ||| far8 o.dy1) else o.rho1)
+      (if c === 28 then rho (far8 o.dx2 ||| far8 o.dy2) else o.rho2)))
 
 ------------------------------------------------------------------------------------
 -- Stage B: the march.
@@ -220,13 +220,13 @@ def StageB.init : StageB HwTy.El :=
 
 -- one ball's distance at depth z: |(ρ, z − cz)| − R, the length from below
 def ballDist {r : HwTy → Type} [Hw r] (rho cz z : r D12) : r D12 :=
-  Hw.sub (norm2 rho (abs12 (Hw.sub z cz))) (Hw.lit 12 Bl.R)
+  norm2 rho (abs12 (z - cz)) - Hw.ofNat Bl.R
 
 -- the smooth minimum (k = 64 units), less one unit for the rounding
 def sminK {r : HwTy → Type} [Hw r] (d1 d2 : r D12) : r D12 :=
-  let e := abs12 (Hw.sub d2 d1);
-  let g := Hw.mux (Hw.ult e (Hw.lit 12 64)) (Hw.sub (Hw.lit 12 64) e) (Hw.lit 12 0);
-  Hw.sub (Hw.sub (smin12 d1 d2) (zext 7 (Rom.at 5 (Hw.slice 2 5 g) Bl.corrT))) (Hw.lit 12 1)
+  let e := abs12 (d2 - d1);
+  let g := if e <ᵤ 64 then Hw.lit 12 64 - e else 0;
+  smin12 d1 d2 - zext 7 (Rom.at 5 (Hw.slice 2 5 g) Bl.corrT) - 1
 
 def x4 {r : HwTy → Type} [Hw r] (v : r D8) : r D12 :=
   Hw.cat (Hw.slice 7 1 v) (Hw.cat (Hw.slice 7 1 v) (Hw.cat v (Hw.lit 2 0)))
@@ -238,23 +238,23 @@ def stageBStep {r : HwTy → Type} [Hw r] (s : StageB r) (shift : r Bit) (a : AO
   let b := s.inp;
   let mr := s.mr;
   let ph := s.hf.ph;
-  let dd := ballDist (Hw.mux ph b.rho2 b.rho1) (Hw.mux ph sc.z2 sc.z1) mr.z;
+  let dd := ballDist (if ph then b.rho2 else b.rho1) (if ph then sc.z2 else sc.z1) mr.z;
   let d := sminK s.hf.d1 dd;
-  let marching := band (bnot mr.done) ph;
+  let marching := ~~~mr.done &&& ph;
   let close := slt12 d (Hw.lit 12 3);
-  let z2 := Hw.add mr.z d;
-  let gone := bor (bnot (Hw.ult z2 (Hw.lit 12 Bl.far))) (eqLit mr.left 1);
-  let nl := fun (dx dy : r D8) => Hw.sub (Hw.sub (Hw.lit 12 0) (x4 dx)) (x4 dy);
+  let z2 := mr.z + d;
+  let gone := z2 ≥ᵤ Hw.ofNat Bl.far ||| mr.left === 1;
+  let nl := fun (dx dy : r D8) => -x4 dx - x4 dy;
   StageB.pack (StageB.mk
-    (BIn.mk (Hw.mux shift (zext 4 a.rho1) b.rho1) (Hw.mux shift (zext 4 a.rho2) b.rho2)
-      (Hw.mux shift (nl a.dx1 a.dy1) b.l1) (Hw.mux shift (nl a.dx2 a.dy2) b.l2))
+    (BIn.mk (if shift then zext 4 a.rho1 else b.rho1) (if shift then zext 4 a.rho2 else b.rho2)
+      (if shift then nl a.dx1 a.dy1 else b.l1) (if shift then nl a.dx2 a.dy2 else b.l2))
     (BMarch.mk
-      (Hw.mux shift (Hw.lit 12 Bl.z0) (Hw.mux (band marching (bnot close)) z2 mr.z))
-      (Hw.mux shift (Hw.lit 5 16) (Hw.mux marching (dec mr.left) mr.left))
-      (Hw.mux shift lo (Hw.mux (band marching close) hi mr.hit))
-      (Hw.mux shift lo (Hw.mux (band marching (bor close gone)) hi mr.done))
-      (Hw.mux marching (bnot (slt12 dd s.hf.d1)) mr.near1))
-    (BHalf.mk (Hw.mux shift lo (bnot ph)) (Hw.mux ph s.hf.d1 dd)))
+      (if shift then Hw.lit 12 Bl.z0 else if marching &&& ~~~close then z2 else mr.z)
+      (if shift then 16 else if marching then mr.left - 1 else mr.left)
+      (if shift then 0 else if marching &&& close then 1 else mr.hit)
+      (if shift then 0 else if marching &&& (close ||| gone) then 1 else mr.done)
+      (if marching then ~~~(slt12 dd s.hf.d1) else mr.near1))
+    (BHalf.mk (if shift then 0 else ~~~ph) (if ph then s.hf.d1 else dd)))
 
 -- the colour of the pixel from stage B's result for it
 -- the front of a ball at distance ρ from its centre line: √(R² − ρ²), units, by ρ in
@@ -269,25 +269,25 @@ def blobColor {r : HwTy → Type} [Hw r] (s : StageB r) (sc : BScene r) (x : r D
   let n1 := s.mr.near1;
   -- −nx − ny − 2 nz of the nearer ball, nz from its ρ (the sphere's own normal, not
   -- the march's depth, which the length estimate leaves up to 8 % off)
-  let rho := Hw.mux n1 b.rho1 b.rho2;
-  let idx := Hw.mux (eqLit (Hw.slice 6 6 rho) 0) (Hw.slice 1 5 rho) (Hw.lit 5 31);
+  let rho := if n1 then b.rho1 else b.rho2;
+  let idx := if Hw.slice 6 6 rho === 0 then Hw.slice 1 5 rho else 31;
   let front := zext 6 (Rom.at 6 idx Bl.frontT);
-  let l := Hw.add (Hw.mux n1 b.l1 b.l2) (Hw.cat (Hw.slice 0 11 front) lo);
+  let l := (if n1 then b.l1 else b.l2) + Hw.cat (Hw.slice 0 11 front) lo;
   -- brightness 20 + 3/8 l (l ≤ 117: up to 63), clamped
   let sg := Hw.slice 11 1 l;
   let l4 := Hw.cat sg (Hw.cat sg (Hw.slice 2 10 l));
   let l8 := Hw.cat sg (Hw.cat sg (Hw.cat sg (Hw.slice 3 9 l)));
-  let v := Hw.add (Hw.lit 12 20) (Hw.add l4 l8);
-  let lum := Hw.mux (neg12 v) (Hw.lit 6 0) (Hw.mux (Hw.ult v (Hw.lit 12 64)) (Hw.slice 0 6 v) (Hw.lit 6 63));
+  let v := Hw.lit 12 20 + (l4 + l8);
+  let lum := if neg12 v then 0 else if v <ᵤ 64 then Hw.slice 0 6 v else 63;
   -- the highlight: from brightness 56 up, the colour runs to white (OR-ed in)
-  let sp := Hw.mux (eqLit (Hw.slice 3 3 lum) 7) (Hw.cat (Hw.slice 0 3 lum) lo) (Hw.lit 4 0);
+  let sp := if Hw.slice 3 3 lum === 7 then Hw.cat (Hw.slice 0 3 lum) lo else 0;
   let orange := rgb565 (Hw.slice 1 5 lum) (Hw.cat lo (Hw.slice 1 5 lum)) (Hw.cat (Hw.lit 2 0) (Hw.slice 3 3 lum));
   let cyan := rgb565 (Hw.cat (Hw.lit 2 0) (Hw.slice 3 3 lum)) lum (Hw.slice 1 5 lum);
   let spec := rgb565 (Hw.cat sp lo) (Hw.cat sp (Hw.lit 2 0)) (Hw.cat sp lo);
-  let ball := Hw.or (Hw.mux n1 orange cyan) spec;
+  let ball := (if n1 then orange else cyan) ||| spec;
   -- the sky: dark blue at the top to purple at the bottom
-  let sky := rgb565 (Hw.slice 1 5 y) (Hw.cat (Hw.lit 2 0) (Hw.slice 2 4 y)) (Hw.add (Hw.lit 5 8) (Hw.cat lo (Hw.slice 2 4 y)));
-  Hw.mux s.mr.hit ball sky
+  let sky := rgb565 (Hw.slice 1 5 y) (Hw.cat (Hw.lit 2 0) (Hw.slice 2 4 y)) (Hw.lit 5 8 + Hw.cat lo (Hw.slice 2 4 y));
+  if s.mr.hit then ball else sky
 
 ------------------------------------------------------------------------------------
 -- The design.
@@ -304,9 +304,9 @@ def BlobsDemo.init (c : RgbCfg) : BlobsDemo c.frameLog HwTy.El :=
 
 -- the pixel k after (x, y), k = 1, 2
 def nextPx {r : HwTy → Type} [Hw r] (k : Nat) (x : r D7) (y : r D6) : r (HwTy.prod D7 D6) :=
-  let nx := Hw.add x (Hw.lit 7 k);
-  let wrap := bnot (Hw.ult nx (Hw.lit 7 Rgb.width));
-  Hw.pair (Hw.mux wrap (Hw.sub nx (Hw.lit 7 Rgb.width)) nx) (Hw.mux wrap (inc y) y)
+  let nx := x + Hw.ofNat k;
+  let wrap := nx ≥ᵤ Hw.ofNat Rgb.width;
+  Hw.pair (if wrap then nx - Hw.ofNat Rgb.width else nx) (if wrap then y + 1 else y)
 
 def blobsStep {r : HwTy → Type} [Hw r] (c : RgbCfg) (rom : RomT) (s : BlobsDemo c.frameLog r) (x : OledPins r)
     : r (HwTy.prod (BlobsDemo.code c.frameLog) RgbBoard.code) :=
@@ -316,25 +316,25 @@ def blobsStep {r : HwTy → Type} [Hw r] (c : RgbCfg) (rom : RomT) (s : BlobsDem
   let sc := BScene.at t;
   let op := ROp.of (Rom.at 9 cs.sq.pc rom);
   let ready := spiReady cs.spi;
-  let frameGo := band op.frame (band ready (band cs.pins.cs cs.fr.pend));
+  let frameGo := op.frame &&& (ready &&& (cs.pins.cs &&& cs.fr.pend));
   -- a pixel's high byte goes out: B takes pixel n + 1, A starts n + 2. At a frame's
   -- start: A starts (0, 0) a cycle after the frame counter moved, and 31 cycles later
   -- B takes it and A starts (1, 0).
-  let loadHi := band (band (bor op.blank op.pix) ready) (bnot g.half);
-  let fStart := eqLit s.fdel 1;
-  let fShift := eqLit s.fdel 32;
-  let shift := bor loadHi fShift;
+  let loadHi := (op.blank ||| op.pix) &&& ready &&& ~~~g.half;
+  let fStart := s.fdel === 1;
+  let fShift := s.fdel === 32;
+  let shift := loadHi ||| fShift;
   let n2 := nextPx 2 g.x g.y;
-  let tx := Hw.mux fStart (Hw.lit 7 0) (Hw.mux fShift (Hw.lit 7 1) (Hw.fst n2));
-  let ty := Hw.mux (bor fStart fShift) (Hw.lit 6 0) (Hw.snd n2);
+  let tx := if fStart then 0 else if fShift then 1 else Hw.fst n2;
+  let ty := if fStart ||| fShift then 0 else Hw.snd n2;
   let color := blobColor s.b sc g.x g.y t;
   let p := cs.pins;
   let bar := Hw.lit 4 1;
   Hw.pair
     (BlobsDemo.pack c.frameLog (BlobsDemo.mk (RCtl.unpack c.frameLog (rctlStep c rom cs color))
-      (StageA.unpack (stageAStep s.a (bor fStart shift) tx ty sc))
+      (StageA.unpack (stageAStep s.a (fStart ||| shift) tx ty sc))
       (StageB.unpack (stageBStep s.b shift s.a.out sc))
-      (Hw.mux frameGo (Hw.lit 6 0) (Hw.mux (eqLit s.fdel 63) s.fdel (inc s.fdel)))))
+      (if frameGo then 0 else if s.fdel === 63 then s.fdel else s.fdel + 1)))
     (RgbBoard.pack (RgbBoard.mk hi (Hw.cat (rctlShowing cs) bar)
       p.cs cs.spi.mosi cs.spi.sclk p.dc p.res p.vccen p.pmoden))
 

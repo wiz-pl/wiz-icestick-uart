@@ -221,7 +221,7 @@ def RomT.build (k : Nat) (es : List Nat) : RomT := RomT.go k (List.append es (Wa
 
 def Rom.at {r : HwTy → Type} [Hw r] (w : Nat) {ω n : Nat} (a : r (HwTy.bits n)) : RomT → r (HwTy.bits w)
   | .leaf v => Hw.lit w v
-  | .node k hi lo => Hw.mux (Hw.slice k 1 a) (Rom.at w a hi) (Rom.at w a lo)
+  | .node k hi lo => if Hw.slice k 1 a then Rom.at w a hi else Rom.at w a lo
 
 -- the entry at address `a` of a memory of `2^k` entries
 def Rom.tree {r : HwTy → Type} [Hw r] (w : Nat) {ω n : Nat} (a : r (HwTy.bits n)) (k : Nat) (es : List Nat) : r (HwTy.bits w) :=
@@ -230,7 +230,7 @@ def Rom.tree {r : HwTy → Type} [Hw r] (w : Nat) {ω n : Nat} (a : r (HwTy.bits
 -- bit `i` of `x`, `i` a signal
 def pickBit {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) {ω m : Nat} (i : r (HwTy.bits m)) : Nat → Nat → r Bit
   | .zero, lo => Hw.slice lo 1 x
-  | .succ k, lo => Hw.mux (Hw.slice k 1 i) (pickBit x i k (lo + Nat.pow 2 k)) (pickBit x i k lo)
+  | .succ k, lo => if Hw.slice k 1 i then pickBit x i k (lo + Nat.pow 2 k) else pickBit x i k lo
 
 def zext {r : HwTy → Type} [Hw r] {ω n : Nat} (m : Nat) (x : r (HwTy.bits n)) : r (HwTy.bits (Nat.add m n)) :=
   Hw.cat (Hw.lit m 0) x
@@ -255,17 +255,17 @@ structure Spi (r : HwTy → Type) where
 
 def Spi.init : Spi HwTy.El := Spi.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 7 0) (BitVec.ofNat 4 0)
 
-def spiReady {r : HwTy → Type} [Hw r] (s : Spi r) : r Bit := eqLit s.cnt 0
+def spiReady {r : HwTy → Type} [Hw r] (s : Spi r) : r Bit := s.cnt === 0
 
 def spiStep {r : HwTy → Type} [Hw r] (s : Spi r) (load : r Bit) (d : r D8) : r Spi.code :=
-  let busy := bnot (spiReady s);
-  let go := band (spiReady s) load;
-  let fall := band busy s.sclk;
+  let busy := ~~~(spiReady s);
+  let go := spiReady s &&& load;
+  let fall := busy &&& s.sclk;
   Spi.pack (Spi.mk
-    (Hw.mux go lo (Hw.mux busy (bnot s.sclk) s.sclk))
-    (Hw.mux go (Hw.slice 7 1 d) (Hw.mux fall (Hw.slice 6 1 s.sh) s.mosi))
-    (Hw.mux go (Hw.slice 0 7 d) (Hw.mux fall (Hw.cat (Hw.slice 0 6 s.sh) lo) s.sh))
-    (Hw.mux go (Hw.lit 4 15) (Hw.mux busy (dec s.cnt) s.cnt)))
+    (if go then 0 else if busy then ~~~s.sclk else s.sclk)
+    (if go then Hw.slice 7 1 d else if fall then Hw.slice 6 1 s.sh else s.mosi)
+    (if go then Hw.slice 0 7 d else if fall then Hw.cat (Hw.slice 0 6 s.sh) lo else s.sh)
+    (if go then 15 else if busy then s.cnt - 1 else s.cnt))
 
 ------------------------------------------------------------------------------------
 -- The controller.
@@ -315,7 +315,7 @@ def Ctl.init (c : OledCfg) : Ctl c.frameLog HwTy.El :=
 
 -- the display is on (the program is in its frame loop)
 def ctlShowing {r : HwTy → Type} [Hw r] (c : OledCfg) {ω fl : Nat} (s : Ctl fl r) : r Bit :=
-  bnot (Hw.ult s.pc (Hw.lit 6 (Prog.frameAt c)))
+  s.pc ≥ᵤ Hw.ofNat (Prog.frameAt c)
 
 -- one cycle (`rom`: `Prog.tree c`); `pix` is the pixel at (Gen.x s.gen, Gen.y s.gen) for frame `s.t`
 -- the program's memory (built once: `Prog.tree c`)
@@ -323,47 +323,48 @@ def Prog.tree (c : OledCfg) : RomT := RomT.build 6 (Prog.rom c)
 
 def ctlStep {r : HwTy → Type} [Hw r] (c : OledCfg) (rom : RomT) (s : Ctl c.frameLog r) (pix : r Bit) : r (Ctl.code c.frameLog) :=
   let e := Rom.at 9 s.pc rom;
-  let isCmd := bnot (Hw.slice 8 1 e);
+  let isCmd := ~~~(Hw.slice 8 1 e);
   let code := Hw.slice 0 4 e;
   let ready := spiReady s.spi;
-  let isOp := fun (k : Nat) => band (Hw.slice 8 1 e) (eqLit code k);
+  let isOp := fun (k : Nat) => Hw.slice 8 1 e &&& code === Hw.ofNat k;
   let opVdd := isOp 0;
   let opResLo := isOp 1;
   let opResHi := isOp 2;
   let opVbat := isOp 3;
-  let opWait := bor (isOp 4) (isOp 5);
+  let opWait := isOp 4 ||| isOp 5;
   let opBlank := isOp 6;
   let opFrame := isOp 7;
   let opPix := isOp 8;
   let opAgain := isOp 9;
-  let isData := bor opBlank opPix;
+  let isData := opBlank ||| opPix;
   let g := s.gen;
-  let lastByte := eqLit g.idx (OledCfg.bytes c - 1);
-  let loadData := band isData (band g.full ready);
-  let loadCmd := band isCmd ready;
-  let waitDone := band s.armed (eqLit s.wait 0);
-  let frameGo := band opFrame (band s.cs s.pend);
-  let adv := band ready (bor isCmd (bor opVdd (bor opResLo (bor opResHi (bor opVbat
-    (bor (band opWait waitDone) (bor frameGo (band loadData lastByte))))))));
-  let tick := eqLit s.timer (Nat.pow 2 c.frameLog - 1);
-  let genOn := band isData (bnot g.full);
-  let bit := band pix opPix;
+  let lastByte := g.idx === Hw.ofNat (OledCfg.bytes c - 1);
+  let loadData := isData &&& (g.full &&& ready);
+  let loadCmd := isCmd &&& ready;
+  let waitDone := s.armed &&& s.wait === 0;
+  let frameGo := opFrame &&& (s.cs &&& s.pend);
+  let adv := ready &&& (isCmd ||| (opVdd ||| (opResLo ||| (opResHi ||| (opVbat |||
+    ((opWait &&& waitDone) ||| (frameGo ||| (loadData &&& lastByte))))))));
+  let tick := s.timer === Hw.ofNat (Nat.pow 2 c.frameLog - 1);
+  let genOn := isData &&& ~~~g.full;
+  let bit := pix &&& opPix;
+  -- (the ascription: without it the `if` in the first field does not elaborate, FINDINGS.md)
   Ctl.pack c.frameLog (Ctl.mk
-    (Hw.mux (band ready opAgain) (Hw.lit 6 (Prog.frameAt c)) (Hw.mux adv (inc s.pc) s.pc))
-    (band opWait (band ready (bnot waitDone)))
-    (Hw.mux (band opWait (bnot s.armed)) (Hw.mux (isOp 5) (Hw.lit 21 c.tVbat) (Hw.lit 21 c.tVdd))
-      (Hw.mux (eqLit s.wait 0) s.wait (dec s.wait)))
-    (Hw.mux (band ready opVdd) lo s.vdd)
-    (Hw.mux (band ready opResLo) lo (Hw.mux (band ready opResHi) hi s.res))
-    (Hw.mux (band ready opVbat) lo s.vbat)
-    (Hw.mux (band ready opFrame) (bnot (band s.pend s.cs)) (Hw.mux (band ready opVdd) lo s.cs))
-    (Hw.mux loadCmd lo (Hw.mux loadData hi s.dc))
-    (Spi.unpack (spiStep s.spi (bor loadCmd loadData) (Hw.mux isCmd (Hw.slice 0 8 e) g.nb)))
+    (if ready &&& opAgain then Hw.lit 6 (Prog.frameAt c) else if adv then s.pc + 1 else s.pc)
+    (opWait &&& (ready &&& ~~~waitDone))
+    (if opWait &&& ~~~s.armed then (if isOp 5 then Hw.lit 21 c.tVbat else Hw.lit 21 c.tVdd)
+      else if s.wait === 0 then s.wait else s.wait - 1)
+    (if ready &&& opVdd then 0 else s.vdd)
+    (if ready &&& opResLo then 0 else if ready &&& opResHi then 1 else s.res)
+    (if ready &&& opVbat then 0 else s.vbat)
+    (if ready &&& opFrame then ~~~(s.pend &&& s.cs) else if ready &&& opVdd then 0 else s.cs)
+    (if loadCmd then 0 else if loadData then 1 else s.dc)
+    (Spi.unpack (spiStep s.spi (loadCmd ||| loadData) (if isCmd then Hw.slice 0 8 e else g.nb)))
     (Gen.mk
-      (Hw.mux loadData (Hw.mux lastByte (Hw.lit 10 0) (inc g.idx)) g.idx)
-      (Hw.mux genOn (dec g.k) g.k)
-      (Hw.mux genOn (Hw.cat (Hw.slice 0 7 g.nb) bit) g.nb)
-      (Hw.mux (band genOn (eqLit g.k 0)) hi (Hw.mux loadData lo g.full)))
-    (inc s.timer)
-    (Hw.mux tick hi (Hw.mux frameGo lo s.pend))
-    (Hw.mux tick (Hw.add s.t (Hw.lit 11 c.tStep)) s.t))
+      (if loadData then (if lastByte then 0 else g.idx + 1) else g.idx)
+      (if genOn then g.k - 1 else g.k)
+      (if genOn then Hw.cat (Hw.slice 0 7 g.nb) bit else g.nb)
+      (if genOn &&& g.k === 0 then 1 else if loadData then 0 else g.full))
+    (s.timer + 1)
+    (if tick then 1 else if frameGo then 0 else s.pend)
+    (if tick then s.t + Hw.ofNat c.tStep else s.t) : Ctl c.frameLog r)

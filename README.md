@@ -335,6 +335,7 @@ nix develop
 grail build                 # check the designs and the proofs, compile the driver
 grail test                  # the simulation tests (tests/*.wiz)
 .grail/bin/icestick all     # gen, sim, bit, postsim: everything short of the board
+.grail/bin/icestick quick   # the Verilog and pin constraints only, no simulation (also `oled quick`)
 ```
 
 The first `grail build` takes about five minutes on four cores, nearly all of it the kernel checking
@@ -343,9 +344,10 @@ that grail's cache answers. Without the Cachix cache of the Wiz project as a tru
 substituter, Nix also builds wiz from source the first time (a few minutes).
 
 With tower, Wiz's toolchain manager, instead of the flake's `wiz`: `wiz-toolchain`
-names the commit this repository is developed against (master b6ad475, the commit
+names the commit this repository is developed against (master 50cd3e7, the commit
 `flake.lock` pins too; it needs Wiz PRs #91, #108 and #118 for the HDL library's named
-ports, bundles, emitters and the step functions without `BStep`). tower installs it
+ports, bundles, emitters and the step functions without `BStep`, #202 for the operators
+on signals, and #200 for compiling the IR blaster's wide state quickly). tower installs it
 from the commit's release snapshot, and its `wiz` and `grail` shims pick it up in this
 directory (`tower show`; see the Wiz documentation, stage 26). The release ships its own
 C compiler and GMP, so no `grail.local.wiz` is needed. You then need yosys,
@@ -573,7 +575,7 @@ tests/                   simulation tests for `grail test`
 
 ## Versions
 
-wiz and grail `b6ad475` (2026-11-11), yosys 0.70, nextpnr 0.11.1, icestorm
+wiz and grail `50cd3e7` (2026-11-12), yosys 0.70, nextpnr 0.11.1, icestorm
 2025-06-03, Icarus Verilog 13.0, from nixpkgs `02c087f` (the Wiz flake's pin).
 
 ## Licence

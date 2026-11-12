@@ -222,7 +222,7 @@ def RCtl.init (c : RgbCfg) : RCtl c.frameLog HwTy.El :=
     Spi.init
 
 def rctlShowing {r : HwTy → Type} [Hw r] {ω fl : Nat} (s : RCtl fl r) : r Bit :=
-  bnot (Hw.ult s.sq.pc (Hw.lit 7 RProg.frameAt))
+  s.sq.pc ≥ᵤ Hw.ofNat RProg.frameAt
 
 -- the step's decoded entry
 structure ROp (r : HwTy → Type) where
@@ -239,9 +239,9 @@ structure ROp (r : HwTy → Type) where
 
 def ROp.of {r : HwTy → Type} [Hw r] (e : r D9) : ROp r :=
   let code := Hw.slice 0 4 e;
-  let isOp := fun (k : Nat) => band (Hw.slice 8 1 e) (eqLit code k);
-  ROp.mk (bnot (Hw.slice 8 1 e)) (isOp 0) (isOp 1) (isOp 2) (isOp 3)
-    (bor (isOp 4) (bor (isOp 5) (isOp 10))) (isOp 6) (isOp 7) (isOp 8) (isOp 9)
+  let isOp := fun (k : Nat) => Hw.slice 8 1 e &&& code === Hw.ofNat k;
+  ROp.mk (~~~(Hw.slice 8 1 e)) (isOp 0) (isOp 1) (isOp 2) (isOp 3)
+    (isOp 4 ||| (isOp 5 ||| isOp 10)) (isOp 6) (isOp 7) (isOp 8) (isOp 9)
 
 -- one cycle (`rom`: `RProg.tree`); `color` is the pixel at (s.gen.x, s.gen.y) for frame
 -- s.fr.t
@@ -253,38 +253,39 @@ def rctlStep {r : HwTy → Type} [Hw r] (c : RgbCfg) (rom : RomT) (s : RCtl c.fr
   let p := s.pins;
   let f := s.fr;
   let sq := s.sq;
-  let isData := bor op.blank op.pix;
-  let lastX := eqLit g.x (Rgb.width - 1);
-  let lastPixel := band lastX (eqLit g.y (Rgb.height - 1));
-  let loadData := band isData ready;
-  let loadCmd := band op.cmd ready;
-  let waitDone := band sq.armed (eqLit sq.wait 0);
-  let frameGo := band op.frame (band p.cs f.pend);
-  let adv := band ready (bor op.cmd (bor op.vdd (bor op.resLo (bor op.resHi (bor op.vcc
-    (bor (band op.wait waitDone) (bor frameGo (band loadData (band g.half lastPixel)))))))));
-  let tick := eqLit f.timer (Nat.pow 2 c.frameLog - 1);
-  let col := Hw.mux op.pix color (Hw.lit 16 0);
-  let byte := Hw.mux op.cmd (Hw.slice 0 8 e) (Hw.mux g.half g.lo (Hw.slice 8 8 col));
+  let isData := op.blank ||| op.pix;
+  let lastX := g.x === Hw.ofNat (Rgb.width - 1);
+  let lastPixel := lastX &&& g.y === Hw.ofNat (Rgb.height - 1);
+  let loadData := isData &&& ready;
+  let loadCmd := op.cmd &&& ready;
+  let waitDone := sq.armed &&& sq.wait === 0;
+  let frameGo := op.frame &&& (p.cs &&& f.pend);
+  let adv := ready &&& (op.cmd ||| (op.vdd ||| (op.resLo ||| (op.resHi ||| (op.vcc |||
+    ((op.wait &&& waitDone) ||| (frameGo ||| (loadData &&& (g.half &&& lastPixel)))))))));
+  let tick := f.timer === Hw.ofNat (Nat.pow 2 c.frameLog - 1);
+  let col := if op.pix then color else 0;
+  let byte := if op.cmd then Hw.slice 0 8 e else if g.half then g.lo else Hw.slice 8 8 col;
   let code := Hw.slice 0 4 e;
-  let waitLen := Hw.mux (eqLit code 5) (Hw.lit 21 c.tVcc) (Hw.mux (eqLit code 4) (Hw.lit 21 c.tVdd) (Hw.lit 21 c.tRes));
-  let nextPix := band loadData g.half;
+  let waitLen : r (HwTy.bits 21) := if code === 5 then Hw.ofNat c.tVcc else if code === 4 then Hw.ofNat c.tVdd else Hw.ofNat c.tRes;
+  let nextPix := loadData &&& g.half;
+  -- (the ascription: without it the `if` in the first field does not elaborate, FINDINGS.md)
   RCtl.pack c.frameLog (RCtl.mk
     (RSeq.mk
-      (Hw.mux (band ready op.again) (Hw.lit 7 RProg.frameAt) (Hw.mux adv (inc sq.pc) sq.pc))
-      (band op.wait (band ready (bnot waitDone)))
-      (Hw.mux (band op.wait (bnot sq.armed)) waitLen (Hw.mux (eqLit sq.wait 0) sq.wait (dec sq.wait))))
+      (if ready &&& op.again then Hw.lit 7 RProg.frameAt else if adv then sq.pc + 1 else sq.pc)
+      (op.wait &&& (ready &&& ~~~waitDone))
+      (if op.wait &&& ~~~sq.armed then waitLen else if sq.wait === 0 then sq.wait else sq.wait - 1))
     (RPins.mk
-      (Hw.mux (band ready op.vdd) hi p.pmoden)
-      (Hw.mux (band ready op.vcc) hi p.vccen)
-      (Hw.mux (band ready op.resLo) lo (Hw.mux (band ready op.resHi) hi p.res))
-      (Hw.mux (band ready op.frame) (bnot (band f.pend p.cs)) (Hw.mux (band ready op.vdd) lo p.cs))
-      (Hw.mux loadCmd lo (Hw.mux loadData hi p.dc)))
-    (RFrame.mk (inc f.timer)
-      (Hw.mux tick hi (Hw.mux frameGo lo f.pend))
-      (Hw.mux frameGo (Hw.add f.t (Hw.lit 11 c.tStep)) f.t))
+      (if ready &&& op.vdd then 1 else p.pmoden)
+      (if ready &&& op.vcc then 1 else p.vccen)
+      (if ready &&& op.resLo then 0 else if ready &&& op.resHi then 1 else p.res)
+      (if ready &&& op.frame then ~~~(f.pend &&& p.cs) else if ready &&& op.vdd then 0 else p.cs)
+      (if loadCmd then 0 else if loadData then 1 else p.dc))
+    (RFrame.mk (f.timer + 1)
+      (if tick then 1 else if frameGo then 0 else f.pend)
+      (if frameGo then f.t + Hw.ofNat c.tStep else f.t))
     (RGen.mk
-      (Hw.mux nextPix (Hw.mux lastX (Hw.lit 7 0) (inc g.x)) g.x)
-      (Hw.mux (band nextPix lastX) (inc g.y) g.y)
-      (Hw.mux loadData (bnot g.half) g.half)
-      (Hw.mux (band loadData (bnot g.half)) (Hw.slice 0 8 col) g.lo))
-    (Spi.unpack (spiStep s.spi (bor loadCmd loadData) byte)))
+      (if nextPix then (if lastX then 0 else g.x + 1) else g.x)
+      (if nextPix &&& lastX then g.y + 1 else g.y)
+      (if loadData then ~~~g.half else g.half)
+      (if loadData &&& ~~~g.half then Hw.slice 0 8 col else g.lo))
+    (Spi.unpack (spiStep s.spi (loadCmd ||| loadData) byte)) : RCtl c.frameLog r)
