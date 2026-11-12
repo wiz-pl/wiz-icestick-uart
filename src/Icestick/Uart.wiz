@@ -11,8 +11,8 @@ import Icestick.Gates
 -- cycle of each period. (`Icestick.Proofs` shows that its period is exactly `n`.)
 
 def baudStep {r : HwTy → Type} [Hw r] (n : Nat) (c : r B7) : r (HwTy.prod B7 Bit) :=
-  let t := Hw.label "tick" (eqLit c (n - 1));
-  Hw.pair (Hw.mux t (Hw.lit 7 0) (inc c)) t
+  let t := Hw.label "tick" (c === Hw.ofNat (n - 1));
+  Hw.pair (if t then 0 else c + 1) t
 
 ------------------------------------------------------------------------------------
 -- The transmitter. State: the line (a register of its own, so the pin is driven by a
@@ -31,18 +31,18 @@ structure Tx (r : HwTy → Type) where
 
 def Tx.init : Tx HwTy.El := Tx.mk (BitVec.ofNat 1 1) (BitVec.ofNat 4 0) (BitVec.ofNat 7 0) (BitVec.ofNat 9 511)
 
-def txIdle {r : HwTy → Type} [Hw r] (s : Tx r) : r Bit := eqLit s.left 0
+def txIdle {r : HwTy → Type} [Hw r] (s : Tx r) : r Bit := s.left === 0
 
 def txStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Tx r) (start : r Bit) (d : r B8) : r Tx.code :=
   let idle := txIdle s;
-  let go := band idle start;
+  let go := idle &&& start;
   let b := baudStep n s.cnt;
-  let tick := band (bnot idle) (Hw.snd b);
+  let tick := ~~~idle &&& Hw.snd b;
   Tx.pack (Tx.mk
-    (Hw.mux go lo (Hw.mux tick (Hw.slice 0 1 s.sh) s.line))
-    (Hw.mux go (Hw.lit 4 10) (Hw.mux tick (dec s.left) s.left))
-    (Hw.mux go (Hw.lit 7 0) (Hw.fst b))
-    (Hw.mux go (frame9 d) (Hw.mux tick (shiftIn9 s.sh hi) s.sh)))
+    (if go then 0 else if tick then Hw.slice 0 1 s.sh else s.line)
+    (if go then 10 else if tick then s.left - 1 else s.left)
+    (if go then 0 else Hw.fst b)
+    (if go then frame9 d else if tick then shiftIn9 s.sh hi else s.sh))
 
 ------------------------------------------------------------------------------------
 -- The receiver. State: the phase (0: idle, 10: in the start bit, 9 … 2: data bits,
@@ -67,17 +67,17 @@ structure Byte (r : HwTy → Type) where
 def Rx.init : Rx HwTy.El := Rx.mk (BitVec.ofNat 4 0) (BitVec.ofNat 7 0) (BitVec.ofNat 8 0)
 
 def rxStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Rx r) (rx : r Bit) : r (HwTy.prod Rx.code Byte.code) :=
-  let idle := eqLit s.ph 0;
-  let inStart := eqLit s.ph 10;
-  let inStop := eqLit s.ph 1;
-  let fall := band idle (bnot rx);
-  let startTick := band inStart (eqLit s.cnt (Nat.div n 2 - 1));
-  let tick := band (bnot idle) (band (bnot inStart) (eqLit s.cnt (n - 1)));
-  let ph := Hw.mux fall (Hw.lit 4 10)
-    (Hw.mux startTick (Hw.mux rx (Hw.lit 4 0) (Hw.lit 4 9)) (Hw.mux tick (dec s.ph) s.ph));
-  let cnt := Hw.mux (bor fall (bor startTick tick)) (Hw.lit 7 0) (inc s.cnt);
-  let sh := Hw.mux (band tick (bnot inStop)) (shiftIn8 s.sh rx) s.sh;
-  Hw.pair (Rx.pack (Rx.mk ph cnt sh)) (Byte.pack (Byte.mk (band tick (band inStop rx)) s.sh))
+  let idle := s.ph === 0;
+  let inStart := s.ph === 10;
+  let inStop := s.ph === 1;
+  let fall := idle &&& ~~~rx;
+  let startTick := inStart &&& s.cnt === Hw.ofNat (Nat.div n 2 - 1);
+  let tick := ~~~idle &&& (~~~inStart &&& s.cnt === Hw.ofNat (n - 1));
+  let ph := if fall then 10
+    else if startTick then (if rx then 0 else 9) else if tick then s.ph - 1 else s.ph;
+  let cnt := if fall ||| (startTick ||| tick) then 0 else s.cnt + 1;
+  let sh := if tick &&& ~~~inStop then shiftIn8 s.sh rx else s.sh;
+  Hw.pair (Rx.pack (Rx.mk ph cnt sh)) (Byte.pack (Byte.mk (tick &&& (inStop &&& rx)) s.sh))
 
 ------------------------------------------------------------------------------------
 -- The input synchroniser: the RX pin is asynchronous to the clock, so it goes through

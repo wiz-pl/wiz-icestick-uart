@@ -23,7 +23,7 @@ structure Px (r : HwTy → Type) where
 def Px.black {r : HwTy → Type} [Hw r] : Px r := Px.mk (Hw.lit 2 0) (Hw.lit 6 0)
 
 def Px.mux {r : HwTy → Type} [Hw r] (c : r Bit) (a b : Px r) : Px r :=
-  Px.mk (Hw.mux c a.shade b.shade) (Hw.mux c a.idx b.idx)
+  Px.mk (if c then a.shade else b.shade) (if c then a.idx else b.idx)
 
 -- 565: red 5 bits, green 6, blue 5
 def rgb565 {r : HwTy → Type} [Hw r] (red : r D5) (green : r D6) (blue : r D5) : r (HwTy.bits 16) :=
@@ -31,46 +31,46 @@ def rgb565 {r : HwTy → Type} [Hw r] (red : r D5) (green : r D6) (blue : r D5) 
 
 def palette {r : HwTy → Type} [Hw r] (p : Px r) : r (HwTy.bits 16) :=
   let red := sin6 p.idx;
-  let green := sin6 (Hw.add p.idx (Hw.lit 6 21));
-  let blue := sin6 (Hw.add p.idx (Hw.lit 6 43));
-  let half := eqLit p.shade 2;
-  let sh := fun (v : r D5) => Hw.mux half (Hw.cat lo (Hw.slice 1 4 v)) v;
+  let green := sin6 (p.idx + 21);
+  let blue := sin6 (p.idx + 43);
+  let half := p.shade === 2;
+  let sh := fun (v : r D5) => if half then Hw.cat lo (Hw.slice 1 4 v) else v;
   let full := rgb565 (sh red) (Hw.cat (sh green) (Hw.slice 4 1 (sh green))) (sh blue);
-  Hw.mux (eqLit p.shade 0) (Hw.lit 16 0) (Hw.mux (eqLit p.shade 3) (Hw.lit 16 65535) full)
+  if p.shade === 0 then 0 else if p.shade === 3 then 65535 else full
 
 ------------------------------------------------------------------------------------
 
 def plasmaRgb {r : HwTy → Type} [Hw r] (x : r D7) (y : r D6) (t : r D9) : Px r :=
   let tt := Hw.slice 0 6 t;
-  let a := sin6 (Hw.add (Hw.slice 1 6 x) tt);
-  let b := sin6 (Hw.add y (Hw.cat (Hw.slice 0 5 t) lo));
-  let c := sin6 (Hw.sub (Hw.slice 1 6 (Hw.add x (zext 1 y))) tt);
-  let d := sin6 (Hw.sub (Hw.add y (zext 1 a)) tt);
-  let sum := Hw.add (Hw.add (zext 2 a) (zext 2 b)) (Hw.add (zext 2 c) (zext 2 d));
-  Px.mk (Hw.lit 2 1) (Hw.add (Hw.slice 1 6 sum) (Hw.slice 1 6 t))
+  let a := sin6 (Hw.slice 1 6 x + tt);
+  let b := sin6 (y + Hw.cat (Hw.slice 0 5 t) lo);
+  let c := sin6 (Hw.slice 1 6 (x + zext 1 y) - tt);
+  let d := sin6 (y + zext 1 a - tt);
+  let sum := zext 2 a + zext 2 b + (zext 2 c + zext 2 d);
+  Px.mk (Hw.lit 2 1) (Hw.slice 1 6 sum + Hw.slice 1 6 t)
 
 def starsRgb {r : HwTy → Type} [Hw r] (x : r D7) (y : r D6) (t : r D9) : Px r :=
   let far := starLayer 64 x y (Hw.slice 1 8 t) 5;
   let mid := starLayer 64 x y (Hw.slice 0 8 t) 42;
   let near := starLayer 64 x y (Hw.cat (Hw.slice 0 7 t) lo) 23;
   -- a colour per star: from its column on the screen and its row
-  let hue := Hw.add (Hw.slice 1 6 x) y;
+  let hue := Hw.slice 1 6 x + y;
   Px.mux near (Px.mk (Hw.lit 2 3) hue)
     (Px.mux mid (Px.mk (Hw.lit 2 1) hue) (Px.mux far (Px.mk (Hw.lit 2 2) hue) (Px.mk (Hw.lit 2 0) hue)))
 
 def scrollerRgb {r : HwTy → Type} [Hw r] (x : r D7) (y : r D6) (t : r D9) (stars : Px r) : Px r :=
   Px.mux (scroller 64 x y t)
-    (Px.mk (Hw.lit 2 1) (Hw.add (Hw.slice 1 6 x) (Hw.slice 0 6 t)))
+    (Px.mk (Hw.lit 2 1) (Hw.slice 1 6 x + Hw.slice 0 6 t))
     stars
 
 def xorRgb {r : HwTy → Type} [Hw r] (x : r D7) (y : r D6) (t : r D9) : Px r :=
   let ph := Hw.slice 1 6 t;
   let ox := sin6 ph;
-  let oy := sin6 (Hw.add ph (Hw.lit 6 16));
-  let u := Hw.add x (Hw.cat (Hw.lit 1 0) (Hw.cat ox (Hw.slice 2 1 t)));
-  let v := Hw.add (zext 1 y) (Hw.cat (Hw.lit 2 0) oy);
-  let w := Hw.xor u v;
-  Px.mk (Hw.mux (Hw.slice 5 1 w) (Hw.lit 2 1) (Hw.lit 2 2)) (Hw.add (Hw.slice 0 6 w) (Hw.slice 2 6 t))
+  let oy := sin6 (ph + 16);
+  let u := x + Hw.cat (Hw.lit 1 0) (Hw.cat ox (Hw.slice 2 1 t));
+  let v := zext 1 y + Hw.cat (Hw.lit 2 0) oy;
+  let w := u ^^^ v;
+  Px.mk (if Hw.slice 5 1 w then Hw.lit 2 1 else 2) (Hw.slice 0 6 w + Hw.slice 2 6 t)
 
 def effectRgb {r : HwTy → Type} [Hw r] (e : r D2) (x : r D7) (y : r D6) (t : r D9) (stars : Px r) : Px r :=
   Px.mux (Hw.slice 1 1 e)
@@ -81,5 +81,5 @@ def effectRgb {r : HwTy → Type} [Hw r] (e : r D2) (x : r D7) (y : r D6) (t : r
 -- the wipe is over at lt = 48: 24 frames, half a second)
 def rgbPixel {r : HwTy → Type} [Hw r] (e : r D2) (x : r D7) (y : r D6) (lt : r D9) : r (HwTy.bits 16) :=
   let stars := starsRgb x y lt;
-  let wiping := band (eqLit (Hw.slice 6 3 lt) 0) (bnot (Hw.ult x (Hw.cat (Hw.slice 0 6 lt) lo)));
-  palette (Px.mux wiping (effectRgb (dec e) x y lt stars) (effectRgb e x y lt stars))
+  let wiping := Hw.slice 6 3 lt === 0 &&& x ≥ᵤ Hw.cat (Hw.slice 0 6 lt) lo;
+  palette (Px.mux wiping (effectRgb (e - 1) x y lt stars) (effectRgb e x y lt stars))

@@ -15,7 +15,7 @@ def B24 : HwTy := HwTy.bits 24
 
 def blinky : Circuit Pins.code Board.code :=
   Circuit.mk (HwTy.named "count" B24) (BitVec.ofNat 24 0)
-    (fun s x => Hw.pair (Hw.tag "count" (inc (Hw.untag s))) (board hi (Hw.slice 19 5 (Hw.untag s))))
+    (fun s x => Hw.pair (Hw.tag "count" (Hw.untag s + 1)) (board hi (Hw.slice 19 5 (Hw.untag s))))
 
 ------------------------------------------------------------------------------------
 -- 2. hello: send a fixed string, wait 2^g cycles, again. The LEDs show the index.
@@ -32,13 +32,13 @@ structure Hello (g : Nat) (r : HwTy → Type) where
   deriving Bundle
 
 def helloStep {r : HwTy → Type} [Hw r] (n g : Nat) (s : Hello g r) : r (HwTy.prod (Hello.code g) Board.code) :=
-  let sending := Hw.ult s.idx (Hw.lit 5 (List.length helloText));
-  let go := band sending (txIdle s.tx);
-  let again := band (bnot sending) (eqLit s.timer (Nat.pow 2 g - 1));
+  let sending := s.idx <ᵤ Hw.ofNat (List.length helloText);
+  let go := sending &&& txIdle s.tx;
+  let again := ~~~sending &&& s.timer === Hw.ofNat (Nat.pow 2 g - 1);
   Hw.pair
     (Hello.pack g (Hello.mk (Tx.unpack (txStep n s.tx go (rom s.idx 0 helloText)))
-      (Hw.mux go (inc s.idx) (Hw.mux again (Hw.lit 5 0) s.idx))
-      (Hw.mux sending (Hw.lit g 0) (inc s.timer))))
+      (if go then s.idx + 1 else if again then 0 else s.idx)
+      (if sending then 0 else s.timer + 1)))
     (board s.tx.line s.idx)
 
 def hello (n g : Nat) : Circuit Pins.code Board.code :=
@@ -60,12 +60,12 @@ structure Echo (r : HwTy → Type) where
 def echoStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Echo r) (x : Pins r) : r (HwTy.prod Echo.code Board.code) :=
   let rr := rxStep n s.rx s.sync.ff2;
   let got := Byte.unpack (Hw.snd rr);
-  let send := band s.pending (txIdle s.tx);
+  let send := s.pending &&& txIdle s.tx;
   Hw.pair
     (Echo.pack (Echo.mk (Sync.unpack (syncStep s.sync x.uart_rx)) (Rx.unpack (Hw.fst rr))
       (Tx.unpack (txStep n s.tx send s.byte))
-      (Hw.mux got.valid hi (Hw.mux send lo s.pending))
-      (Hw.mux got.valid got.data s.byte)))
+      (if got.valid then 1 else if send then 0 else s.pending)
+      (if got.valid then got.data else s.byte)))
     (board s.tx.line (Hw.slice 0 5 s.byte))
 
 def echo (n : Nat) : Circuit Pins.code Board.code :=
@@ -94,19 +94,19 @@ structure Proto (r : HwTy → Type) where
 def protoStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Proto r) (x : Pins r) : r (HwTy.prod Proto.code Board.code) :=
   let rr := rxStep n s.rx s.sync.ff2;
   let got := Byte.unpack (Hw.snd rr);
-  let isNl := eqLit got.data 10;
-  let endLine := band got.valid isNl;
-  let dataByte := band got.valid (bnot isNl);
-  let send := band (bnot (eqLit s.phase 0)) (txIdle s.tx);
-  let ch := Hw.mux (eqLit s.phase 1) (hexDigit (Hw.slice 4 4 s.hold))
-    (Hw.mux (eqLit s.phase 2) (hexDigit (Hw.slice 0 4 s.hold)) (Hw.lit 8 10));
+  let isNl := got.data === 10;
+  let endLine := got.valid &&& isNl;
+  let dataByte := got.valid &&& ~~~isNl;
+  let send := s.phase =/= 0 &&& txIdle s.tx;
+  let ch := if s.phase === 1 then hexDigit (Hw.slice 4 4 s.hold)
+    else if s.phase === 2 then hexDigit (Hw.slice 0 4 s.hold) else 10;
   Hw.pair
     (Proto.pack (Proto.mk (Sync.unpack (syncStep s.sync x.uart_rx)) (Rx.unpack (Hw.fst rr))
       (Tx.unpack (txStep n s.tx send ch))
-      (Hw.mux endLine (Hw.lit 8 0) (Hw.mux dataByte (crcStep s.crc got.data) s.crc))
-      (Hw.mux endLine s.crc s.hold)
-      (Hw.mux endLine (Hw.lit 2 1) (Hw.mux send (inc s.phase) s.phase))
-      (Hw.mux endLine (inc s.lines) s.lines)))
+      (if endLine then 0 else if dataByte then crcStep s.crc got.data else s.crc)
+      (if endLine then s.crc else s.hold)
+      (if endLine then 1 else if send then s.phase + 1 else s.phase)
+      (if endLine then s.lines + 1 else s.lines)))
     (board s.tx.line (Hw.cat (Hw.lit 1 1) s.lines))
 
 def proto (n : Nat) : Circuit Pins.code Board.code :=

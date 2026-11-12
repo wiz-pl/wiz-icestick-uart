@@ -15,18 +15,6 @@ def B9 : HwTy := HwTy.bits 9
 def hi {r : HwTy → Type} [Hw r] : r Bit := Hw.lit 1 1
 def lo {r : HwTy → Type} [Hw r] : r Bit := Hw.lit 1 0
 
-def band {r : HwTy → Type} [Hw r] (a b : r Bit) : r Bit := Hw.and a b
-def bor {r : HwTy → Type} [Hw r] (a b : r Bit) : r Bit := Hw.or a b
-def bnot {r : HwTy → Type} [Hw r] (a : r Bit) : r Bit := Hw.not a
-
--- `x == k` and `x + 1` at any width
-def eqLit {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r Bit :=
-  Hw.eq x (Hw.lit n k)
-def inc {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) : r (HwTy.bits n) :=
-  Hw.add x (Hw.lit n 1)
-def dec {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) : r (HwTy.bits n) :=
-  Hw.sub x (Hw.lit n 1)
-
 -- Shift registers, least significant bit first: `b` comes in at the top.
 def frame9 {r : HwTy → Type} [Hw r] (d : r B8) : r B9 := Hw.cat (Hw.lit 1 1) d
 def shiftIn9 {r : HwTy → Type} [Hw r] (x : r B9) (b : r Bit) : r B9 := Hw.cat b (Hw.slice 1 8 x)
@@ -38,7 +26,7 @@ def shl1 {r : HwTy → Type} [Hw r] (c : r B8) : r B8 := Hw.cat (Hw.slice 0 7 c)
 -- (a meta-level recursion: the list is gone from the netlist, only constants remain).
 def rom {r : HwTy → Type} [Hw r] (idx : r B5) : Nat → List Nat → r B8
   | _, .nil => Hw.lit 8 0
-  | k, .cons c cs => Hw.mux (eqLit idx k) (Hw.lit 8 c) (rom idx (Nat.succ k) cs)
+  | k, .cons c cs => if idx === Hw.ofNat k then Hw.ofNat c else rom idx (Nat.succ k) cs
 
 ------------------------------------------------------------------------------------
 -- The board's pins, as bundles: the module's ports are `uart_rx`, `uart_tx` and `leds`

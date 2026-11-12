@@ -39,21 +39,21 @@ def keyStep {r : HwTy → Type} [Hw r] (n : Nat) (k : Key r) (pin : r Bit) : r K
   let rr := rxStep n k.rx k.sync.ff2;
   let got := Byte.unpack (Hw.snd rr);
   let d := got.data;
-  let digit := band got.valid (band (eqLit (Hw.slice 3 5 d) 6) (Hw.ult (Hw.slice 0 3 d) (Hw.lit 3 5)));
+  let digit := got.valid &&& (Hw.slice 3 5 d === 6 &&& Hw.slice 0 3 d <ᵤ 5);
   Key.pack (Key.mk (Sync.unpack (syncStep k.sync pin)) (Rx.unpack (Hw.fst rr))
-    (Hw.mux digit (bnot (eqLit (Hw.slice 0 3 d) 0)) k.lock)
-    (Hw.mux digit (dec (Hw.slice 0 2 d)) k.sel))
+    (if digit then Hw.slice 0 3 d =/= 0 else k.lock)
+    (if digit then Hw.slice 0 2 d - 1 else k.sel))
 
 -- the frame counter t (11 bits): effect t[10:9], time within it t[8:0]
 def demoRgbStep {r : HwTy → Type} [Hw r] (c : RgbCfg) (n : Nat) (rom : RomT) (s : DemoRgb c.frameLog r) (x : OledPins r)
     : r (HwTy.prod (DemoRgb.code c.frameLog) RgbBoard.code) :=
   let cs := s.ctl;
   let t := cs.fr.t;
-  let e := Hw.mux s.key.lock s.key.sel (Hw.slice 9 2 t);
+  let e := if s.key.lock then s.key.sel else Hw.slice 9 2 t;
   let color := rgbPixel e cs.gen.x cs.gen.y (Hw.slice 0 9 t);
   let level := Hw.slice 1 4 (sin6 (Hw.slice 0 6 t));
-  let on := Hw.ult (Hw.slice 0 4 cs.fr.timer) level;
-  let oneHot := Hw.cat (band (eqLit e 3) on) (Hw.cat (band (eqLit e 2) on) (Hw.cat (band (eqLit e 1) on) (band (eqLit e 0) on)));
+  let on := Hw.slice 0 4 cs.fr.timer <ᵤ level;
+  let oneHot := Hw.cat (e === 3 &&& on) (Hw.cat (e === 2 &&& on) (Hw.cat (e === 1 &&& on) (e === 0 &&& on)));
   let p := cs.pins;
   Hw.pair
     (DemoRgb.pack c.frameLog (DemoRgb.mk (RCtl.unpack c.frameLog (rctlStep c rom cs color))

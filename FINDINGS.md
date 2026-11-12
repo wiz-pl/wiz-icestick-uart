@@ -27,6 +27,52 @@ is gone (`Circuit.bundled` takes the step function itself, `(echoStep n)`), `Hw.
 (Hw.lit 1 1) d` needs no ascription, and `board` takes the TX line first. G4 remains.
 The text below describes the state at fe4e9c4.
 
+**Since then (branch `cleanup-ops`, wiz 50cd3e7):**
+
+* **G4 is fixed** by Wiz PR #202 (H14 S2): numerals at signal width, `+ - *`, `&&& |||
+  ^^^ ~~~`, `=== =/= <ᵤ ≤ᵤ >ᵤ ≥ᵤ`, and `if` on a one-bit signal as a multiplexer. Every
+  step function is now written with them: `if go then 10 else if tick then s.left - 1
+  else s.left` instead of `Hw.mux go (Hw.lit 4 10) (Hw.mux tick (dec s.left) s.left)`.
+  The project's helpers `band bor bnot eqLit inc dec` are gone; `lo`/`hi` stay where a
+  bit is an argument (`Hw.cat lo …`). The operators are the `Hw` operations, and the
+  rewrite keeps every expression's shape (`a &&& (b &&& c)` where the old text had
+  `band a (band b c)`), so the Verilog of every design is byte-identical to before.
+  Constants from meta-level numbers are `Hw.ofNat (n - 1)`. Where both branches of an
+  `if` are literals and nothing else fixes the width, the first one stays `Hw.lit w k`.
+* **B6 (bug, elaborator, #202's `if`). Some `if`s on signals do not elaborate without a
+  type.** Three cases came up, all fixed by giving a type:
+  * The first field of a parametrised bundle's constructor is an `if`:
+    `Ctl.pack c.frameLog (Ctl.mk (if ready &&& opAgain then Hw.lit 6 … else …) …)`
+    fails with "unification problem is outside the pattern fragment" (the expected type
+    is a hole applied to every local). An ascription works around it:
+    `(Ctl.mk … : Ctl c.frameLog r)`. The same holds for `RCtl.mk`. `Tx.mk (if go then 0
+    else …)`, where the bundle has no parameter, works.
+  * `let fl := if light then rgb565 … else rgb565 …` (both branches are calls whose
+    representation `r` is implicit) fails with "a variable escapes the scope of the hole
+    being solved", and the variable that escapes is the condition, `light`. It works
+    with `let fl : r (HwTy.bits 16) := …`.
+  * `let waitLen := if code === 5 then Hw.lit 21 a else if code === 4 then Hw.lit 21 b
+    else Hw.lit 21 c` fails with "outside the pattern fragment". It works with a type on
+    the `let`.
+  `Hw.mux` gives none of these problems: its type arguments come from the call. The
+  rewrite has five such type annotations (`Oled.ctlStep`, `OledRgb.rctlStep` twice,
+  `Sphere.backdrop` twice).
+* **B5 is fixed** by Wiz PR #200 (reuse across `case` was exponential in a structure's
+  fields). The IR blaster's state is still grouped into `Ed`, `Pt` and `Fr`, for two
+  reasons. The groups read well (editor, printer, frame). And flattening them would
+  rename 13 of the blaster's registers in the Verilog (`ed_len` becomes `len`), which
+  would break the byte-for-byte comparison this cleanup is checked by.
+* **Still to do, waiting for Wiz PRs that are not merged:**
+  * #225 (H14 S4): signed comparisons (`Blobs.slt12` flips the sign bits and compares
+    unsigned; `<ₛ` would replace it), `&&`/`||` on one-bit signals, shifts by a signal
+    (`pickBit`, `bitAt` and `pick8` are multiplexer trees by hand), `deriving BitPack`
+    (the IR blaster's message codes and the CPU's opcodes are `Nat` constants compared
+    with `===`), and `Circuit.registerR` (the designs have no reset: G5).
+  * #199 (`Hdl.Sim.simFast`): `icestick gen` and `oled gen` simulate with
+    `Design.runLeaves` and `Netlist.simulate`. The long scenarios take most of an hour
+    on a busy machine, and `blobs` is not simulated at all. `simFast` is about 25 times
+    faster on `oled_fast`.
+
 ## Bugs
 
 ### B1. Verilog: use before declaration (HDL library)
@@ -120,7 +166,7 @@ limit of what one can keep straight. Wanted: either state as a structure
 (`BitPack`-derived, as in the HDL plan) or circuit combinators that hide the state of
 the parts (`Circuit.seq`, feedback, instances with local state).
 
-### G4. No numerals, operators or conditionals at hardware types
+### G4. No numerals, operators or conditionals at hardware types (fixed: Wiz PR #202)
 
 `Hw.mux go (Hw.lit 4 10) (Hw.mux tick (Hw.sub left (Hw.lit 4 1)) left)` for
 `if go then 10 else if tick then left - 1 else left`. (Numeric classes for bit vectors
@@ -297,7 +343,7 @@ Wanted: a `Package.command`/rule target (inputs, outputs, command line), and
   `power` (0x08) did nothing as a single frame and toggled the TV as a frame followed by
   four repeat codes (0.54 s), 2026-11-11 21:45:41. Code lists give the codes but not
   this; the design sends the repeats for `power` by default.
-* **B5 (bug, performance). A step function over a bundle with many fields compiles
+* **B5 (bug, performance; fixed by Wiz PR #200). A step function over a bundle with many fields compiles
   very slowly.** With 19 fields in `Blaster` (five of them nested bundles), `#ir
   blasterStep` took more than 5 minutes and grail's `ir` job for the driver more than 30
   (it hit grail's job limit); `#ir Blaster.pack` alone took 25 s. Grouping the same

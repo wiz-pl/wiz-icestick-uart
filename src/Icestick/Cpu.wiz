@@ -224,16 +224,16 @@ def Spec.halted (prog : List Nat) (m : Arch) : Bool :=
 -- 2. The hardware: one combinational step of the core.
 
 def memRead {r : HwTy → Type} [Hw r] (m : Mem r) (a : r B3) : r B8 :=
-  Hw.mux (eqLit a 0) m.m0 (Hw.mux (eqLit a 1) m.m1 (Hw.mux (eqLit a 2) m.m2
-  (Hw.mux (eqLit a 3) m.m3 (Hw.mux (eqLit a 4) m.m4 (Hw.mux (eqLit a 5) m.m5
-  (Hw.mux (eqLit a 6) m.m6 m.m7))))))
+  if a === 0 then m.m0 else if a === 1 then m.m1 else if a === 2 then m.m2
+  else if a === 3 then m.m3 else if a === 4 then m.m4 else if a === 5 then m.m5
+  else if a === 6 then m.m6 else m.m7
 
 -- every cell: written when `we` and the address is its own
 def memWrite {r : HwTy → Type} [Hw r] (m : Mem r) (we : r Bit) (a : r B3) (v : r B8) : Mem r :=
-  Mem.mk (Hw.mux we (Hw.mux (eqLit a 0) v m.m0) m.m0) (Hw.mux we (Hw.mux (eqLit a 1) v m.m1) m.m1)
-    (Hw.mux we (Hw.mux (eqLit a 2) v m.m2) m.m2) (Hw.mux we (Hw.mux (eqLit a 3) v m.m3) m.m3)
-    (Hw.mux we (Hw.mux (eqLit a 4) v m.m4) m.m4) (Hw.mux we (Hw.mux (eqLit a 5) v m.m5) m.m5)
-    (Hw.mux we (Hw.mux (eqLit a 6) v m.m6) m.m6) (Hw.mux we (Hw.mux (eqLit a 7) v m.m7) m.m7)
+  Mem.mk (if we then (if a === 0 then v else m.m0) else m.m0) (if we then (if a === 1 then v else m.m1) else m.m1)
+    (if we then (if a === 2 then v else m.m2) else m.m2) (if we then (if a === 3 then v else m.m3) else m.m3)
+    (if we then (if a === 4 then v else m.m4) else m.m4) (if we then (if a === 5 then v else m.m5) else m.m5)
+    (if we then (if a === 6 then v else m.m6) else m.m6) (if we then (if a === 7 then v else m.m7) else m.m7)
 
 -- The decoder: control signals from the opcode alone.
 structure Ctl (r : HwTy → Type) where
@@ -254,17 +254,17 @@ structure Ctl (r : HwTy → Type) where
 
 def orL {r : HwTy → Type} [Hw r] : List (r Bit) → r Bit
   | .nil => lo
-  | .cons b bs => bor b (orL bs)
+  | .cons b bs => b ||| orL bs
 
 def decode {r : HwTy → Type} [Hw r] (op : r B4) : Ctl r :=
-  let ω is := fun (k : Nat) => eqLit op k;
+  let ω is := fun (k : Nat) => op === Hw.ofNat k;
   Ctl.mk
     (orL (.cons (is Op.ldi) (.cons (is Op.ld) (.cons (is Op.addi) (.cons (is Op.add)
       (.cons (is Op.sub) (.cons (is Op.nand) (.cons (is Op.inp) .nil))))))))
     (orL (.cons (is Op.ld) (.cons (is Op.add) (.cons (is Op.sub) (.cons (is Op.nand) .nil)))))
     (is Op.sub)
     (is Op.nand)
-    (bor (is Op.ldi) (is Op.ld))
+    (is Op.ldi ||| is Op.ld)
     (is Op.inp)
     (is Op.st)
     (is Op.led)
@@ -277,7 +277,7 @@ def decode {r : HwTy → Type} [Hw r] (op : r B4) : Ctl r :=
 
 -- The ALU: A + b, A - b, nand, or b itself.
 def alu {r : HwTy → Type} [Hw r] (c : Ctl r) (a b : r B8) : r B8 :=
-  Hw.mux c.aluPass b (Hw.mux c.aluNand (Hw.not (Hw.and a b)) (Hw.mux c.aluSub (Hw.sub a b) (Hw.add a b)))
+  if c.aluPass then b else if c.aluNand then ~~~(a &&& b) else if c.aluSub then a - b else a + b
 
 -- One cycle of the core: the instruction `i` (from the ROM at PC), the UART's state
 -- `p`; the next state and the action on the UART.
@@ -289,19 +289,19 @@ def alu {r : HwTy → Type} [Hw r] (c : Ctl r) (a b : r B8) : r B8 :=
 def coreStep {r : HwTy → Type} [Hw r] (s : Core r) (i : Ins r) (p : Port r) : r (HwTy.prod Core.code Act.code) :=
   let ω c := decode i.op;
   let a := Hw.slice 0 3 i.arg;
-  let b := Hw.mux c.useMem (memRead s.mem a) i.arg;
-  let next := inc s.pc;
-  let go := Hw.label "go" (Hw.mux c.isOut p.txReady (Hw.mux c.isIn p.rxFull (bnot c.isHalt)));
-  let target := Hw.mux c.jmp i.arg (Hw.mux c.jz (Hw.mux (eqLit s.acc 0) i.arg next)
-    (Hw.mux c.jnz (Hw.mux (eqLit s.acc 0) next i.arg) next));
-  let accNew := Hw.mux c.fromRx p.rxByte (alu c s.acc b);
+  let b := if c.useMem then memRead s.mem a else i.arg;
+  let next := s.pc + 1;
+  let go := Hw.label "go" (if c.isOut then p.txReady else if c.isIn then p.rxFull else ~~~c.isHalt);
+  let target := if c.jmp then i.arg else if c.jz then (if s.acc === 0 then i.arg else next)
+    else if c.jnz then (if s.acc === 0 then next else i.arg) else next;
+  let accNew := if c.fromRx then p.rxByte else alu c s.acc b;
   Hw.pair
     (Core.pack (Core.mk
-      (Hw.mux go target s.pc)
-      (Hw.mux go (Hw.mux c.wA accNew s.acc) s.acc)
-      (memWrite s.mem (band go c.wM) a s.acc)
-      (Hw.mux (band go c.wL) (Hw.slice 0 5 s.acc) s.leds)))
-    (Act.pack (Act.mk (band go c.isOut) s.acc (band go c.isIn)))
+      (if go then target else s.pc)
+      (if go then (if c.wA then accNew else s.acc) else s.acc)
+      (memWrite s.mem (go &&& c.wM) a s.acc)
+      (if go &&& c.wL then Hw.slice 0 5 s.acc else s.leds)))
+    (Act.pack (Act.mk (go &&& c.isOut) s.acc (go &&& c.isIn)))
 
 ------------------------------------------------------------------------------------
 -- 3. The board design.
@@ -310,7 +310,7 @@ def coreStep {r : HwTy → Type} [Hw r] (s : Core r) (i : Ins r) (p : Port r) : 
 -- multiplexers on constants, which yosys turns into LUTs (docs/cpu.md: why not BRAM).
 def romW {r : HwTy → Type} [Hw r] (pc : r B8) : Nat → List Nat → r B12
   | _, .nil => Hw.lit 12 0
-  | k, .cons w ws => Hw.mux (eqLit pc k) (Hw.lit 12 w) (romW pc (Nat.succ k) ws)
+  | k, .cons w ws => if pc === Hw.ofNat k then Hw.ofNat w else romW pc (Nat.succ k) ws
 
 def fetch {r : HwTy → Type} [Hw r] (prog : List Nat) (pc : r B8) : Ins r :=
   let w := Hw.label "ins" (romW pc 0 prog);
@@ -337,8 +337,8 @@ def cpuStep {r : HwTy → Type} [Hw r] (n : Nat) (prog : List Nat) (s : CpuSys r
   Hw.pair
     (CpuSys.pack (CpuSys.mk (Sync.unpack (syncStep s.sync x.uart_rx)) (Rx.unpack (Hw.fst rr))
       (Tx.unpack (txStep n s.tx act.send act.data))
-      (Hw.mux got.valid hi (Hw.mux act.take lo s.full))
-      (Hw.mux got.valid got.data s.byte)
+      (if got.valid then 1 else if act.take then 0 else s.full)
+      (if got.valid then got.data else s.byte)
       (Core.unpack (Hw.fst cr))))
     (board s.tx.line s.core.leds)
 
